@@ -1,36 +1,68 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 求人票自動生成アプリ (Job Listing Generator)
 
-## Getting Started
+会社名またはURLを入力すると、AIが求人情報を収集・整理し、きれいなPDFを自動生成するWebアプリです。
 
-First, run the development server:
+## 機能
+
+- 🔍 会社名から求人情報をAI検索・収集
+- 🌐 求人ページURLから直接スクレイピング
+- 🤖 OpenAI GPT-4o-miniで情報を整理・補完
+- 📄 テーブル形式のPDF求人票を自動生成
+
+## セットアップ
 
 ```bash
+# インストール
+npm install
+
+# 環境変数を設定
+cp .env.example .env.local
+# .env.local を編集してAPIキーを設定
+
+# 開発サーバー起動
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## 環境変数
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+| 変数 | 必須 | 説明 |
+|------|------|------|
+| `OPENAI_API_KEY` | ✅ | OpenAI APIキー |
+| `SERPAPI_KEY` | ❌ | SerpAPI キー（Web検索精度向上） |
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## 使い方
 
-## Learn More
+1. http://localhost:3000 を開く
+2. 会社名（例: `〇〇クリニック`）またはURLを入力
+3. 「生成」ボタンをクリック
+4. AIが求人情報を収集・整理（10-30秒）
+5. プレビューを確認
+6. 「PDFダウンロード」でPDFを保存
 
-To learn more about Next.js, take a look at the following resources:
+## 技術スタック
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- **Next.js 15** (App Router)
+- **TypeScript**
+- **Tailwind CSS**
+- **OpenAI API** (GPT-4o-mini)
+- **@react-pdf/renderer** (PDF生成)
+- **cheerio** (HTMLスクレイピング)
+- **SerpAPI** (Web検索、オプション)
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## デプロイ
 
-## Deploy on Vercel
+```bash
+# Vercelにデプロイ
+npx vercel
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Vercelダッシュボードで環境変数 `OPENAI_API_KEY` を設定してください。
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## 求人票フォーマット
+
+| セクション | 項目 |
+|-----------|------|
+| 募集概要 | 職種、給与、勤務地 |
+| 仕事内容 | 業務内容、クリニック紹介 |
+| 募集要項 | 雇用形態、勤務時間、応募資格 |
+| 仕事環境 | 給与・待遇、休日・休暇、福利厚生 |
