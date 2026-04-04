@@ -2,7 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import * as cheerio from "cheerio";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+function getOpenAI() {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("OPENAI_API_KEY が設定されていません");
+  return new OpenAI({ apiKey });
+}
 
 async function fetchUrl(url: string): Promise<string> {
   try {
@@ -47,26 +51,32 @@ function isUrl(s: string): boolean {
 
 export async function POST(req: NextRequest) {
   try {
+    const openai = getOpenAI();
     const { query } = await req.json();
     if (!query) return NextResponse.json({ error: "入力が必要です" }, { status: 400 });
 
     let context = "";
+    const sources: string[] = [];
 
     if (isUrl(query)) {
       context = await fetchUrl(query);
       if (!context) {
         return NextResponse.json({ error: "URLからの情報取得に失敗しました" }, { status: 400 });
       }
+      sources.push(query);
     } else {
       // Search for job info
       const searchResults = await searchWeb(query);
       
-      // Also try common job sites
-      const sites = [
-        `https://www.google.com/search?q=${encodeURIComponent(query + " 求人 募集要項")}`,
-      ];
-      
-      context = searchResults || `会社名: ${query}\n（検索APIが設定されていないため、AIの知識ベースから生成します）`;
+      if (searchResults) {
+        // Extract URLs from search results
+        const urlMatches = searchResults.match(/https?:\/\/[^\s]+/g);
+        if (urlMatches) sources.push(...urlMatches.slice(0, 5));
+        context = searchResults;
+      } else {
+        context = `会社名: ${query}\n（検索APIが設定されていないため、AIの知識ベースから生成します）`;
+        sources.push("AIナレッジベース（外部ソースなし）");
+      }
     }
 
     const systemPrompt = `あなたは求人票作成の専門家です。与えられた情報から、以下のJSON形式で求人票データを生成してください。
@@ -116,6 +126,7 @@ export async function POST(req: NextRequest) {
     if (!content) throw new Error("AI応答が空です");
 
     const jobData = JSON.parse(content);
+    jobData.sources = sources;
     return NextResponse.json(jobData);
   } catch (err: any) {
     console.error("Generate error:", err);

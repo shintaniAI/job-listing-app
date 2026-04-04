@@ -107,6 +107,23 @@ export default function Home() {
             <Section title="仕事環境" rows={result.environment} />
           </div>
 
+          {result.sources && result.sources.length > 0 && (
+            <div className="bg-gray-50 rounded-lg border p-4">
+              <h3 className="font-bold text-gray-700 text-sm mb-2">📎 情報ソース</h3>
+              <ul className="text-sm text-gray-500 space-y-1">
+                {result.sources.map((src: string, i: number) => (
+                  <li key={i}>
+                    {src.startsWith("http") ? (
+                      <a href={src} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline break-all">{src}</a>
+                    ) : (
+                      <span>{src}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           <div className="text-center">
             <button
               onClick={handleDownloadPdf}
