@@ -60,7 +60,7 @@ export default function Home() {
     <main className="max-w-3xl mx-auto px-4 py-12">
       <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成</h1>
       <p className="text-center text-gray-500 mb-8">
-        会社名または求人ページURLを入力すると、AIが求人情報を収集・整理してPDFを生成します
+        求人ページのURLを入力、または会社名でWeb検索して求人情報を収集・整理しPDFを生成します
       </p>
 
       <form onSubmit={handleSubmit} className="flex gap-3 mb-8">

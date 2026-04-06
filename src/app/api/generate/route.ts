@@ -68,15 +68,16 @@ export async function POST(req: NextRequest) {
       // Search for job info
       const searchResults = await searchWeb(query);
       
-      if (searchResults) {
-        // Extract URLs from search results
-        const urlMatches = searchResults.match(/https?:\/\/[^\s]+/g);
-        if (urlMatches) sources.push(...urlMatches.slice(0, 5));
-        context = searchResults;
-      } else {
-        context = `会社名: ${query}\n（検索APIが設定されていないため、AIの知識ベースから生成します）`;
-        sources.push("AIナレッジベース（外部ソースなし）");
+      if (!searchResults) {
+        return NextResponse.json(
+          { error: "求人情報を取得できませんでした。URLを直接入力するか、検索API（SERPAPI_KEY）を設定してください。" },
+          { status: 400 }
+        );
       }
+      // Extract URLs from search results
+      const urlMatches = searchResults.match(/https?:\/\/[^\s]+/g);
+      if (urlMatches) sources.push(...urlMatches.slice(0, 5));
+      context = searchResults;
     }
 
     const systemPrompt = `あなたは求人票作成の専門家です。与えられた情報から、以下のJSON形式で求人票データを生成してください。
