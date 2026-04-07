@@ -51,9 +51,7 @@ export async function POST(req: NextRequest) {
     const jobTitle: string = (body.jobTitle || "").trim();
     const salary: string = (body.salary || "").trim();
 
-    if (!companyName) return NextResponse.json({ error: "会社名は必須です" }, { status: 400 });
-    if (!jobTitle) return NextResponse.json({ error: "職種は必須です" }, { status: 400 });
-
+    // All fields are optional. If nothing is provided, generate a generic template.
     let context = "";
     const sources: string[] = [];
 
@@ -65,20 +63,21 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    if (!context) {
-      const { text, urls } = await searchWeb(`${companyName} ${jobTitle}`);
-      if (!text) {
-        return NextResponse.json(
-          { error: "外部ソースから情報を取得できませんでした。会社HP URLを入力するか、SerpAPI設定を確認してください。" },
-          { status: 400 }
-        );
+    if (!context && (companyName || jobTitle)) {
+      const query = [companyName, jobTitle].filter(Boolean).join(" ");
+      const { text, urls } = await searchWeb(query);
+      if (text) {
+        context = text;
+        sources.push(...urls);
       }
-      context = text;
-      sources.push(...urls);
+    }
+
+    if (!context) {
+      context = "（外部ソース情報なし。入力情報と一般的な求人票テンプレートから生成してください。）";
     }
 
     const systemPrompt = `あなたは求人票作成の専門家です。与えられた外部情報を元に、以下のJSON形式で求人票データを生成してください。
-情報が不足している部分は一般的な内容で補完してかまいませんが、会社名と職種は指定されたものを必ず使用してください。必ず日本語で出力してください。
+情報が不足している部分は一般的な内容で補完してかまいません。会社名・職種が指定されていればそれを使い、未指定なら外部ソースから推定するか汎用的な内容にしてください。必ず日本語で出力してください。
 
 出力JSON形式:
 {
@@ -107,8 +106,8 @@ export async function POST(req: NextRequest) {
   }
 }`;
 
-    const userPrompt = `会社名: ${companyName}
-職種: ${jobTitle}
+    const userPrompt = `会社名: ${companyName || "（未指定）"}
+職種: ${jobTitle || "（未指定）"}
 ${salary ? `給与（そのまま overview.給与 に設定）: ${salary}` : ""}
 
 外部ソースから収集した情報:
@@ -128,9 +127,11 @@ ${context}`;
     if (!content) throw new Error("AI応答が空です");
 
     const jobData = JSON.parse(content);
-    // Enforce user-specified fields
-    jobData.companyName = companyName;
-    jobData.jobTitle = jobTitle;
+    // Enforce user-specified fields if provided
+    if (companyName) jobData.companyName = companyName;
+    if (jobTitle) jobData.jobTitle = jobTitle;
+    jobData.companyName = jobData.companyName || "";
+    jobData.jobTitle = jobData.jobTitle || "";
     if (salary) {
       jobData.overview = jobData.overview || {};
       jobData.overview["給与"] = salary;

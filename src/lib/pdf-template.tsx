@@ -1,20 +1,20 @@
 import React from "react";
+import path from "path";
 import { Document, Page, Text, View, StyleSheet, Font } from "@react-pdf/renderer";
 
-// Register Japanese font
+// Register Japanese font from local filesystem (bundled in public/fonts).
+// Using remote CDN + .woff caused the PDF generation to hang on Vercel.
+const fontDir = path.join(process.cwd(), "public", "fonts");
 Font.register({
   family: "NotoSansJP",
   fonts: [
-    {
-      src: "https://cdn.jsdelivr.net/npm/@fontsource/noto-sans-jp@5.0.1/files/noto-sans-jp-japanese-400-normal.woff",
-      fontWeight: 400,
-    },
-    {
-      src: "https://cdn.jsdelivr.net/npm/@fontsource/noto-sans-jp@5.0.1/files/noto-sans-jp-japanese-700-normal.woff",
-      fontWeight: 700,
-    },
+    { src: path.join(fontDir, "NotoSansJP-Regular.ttf"), fontWeight: 400 },
+    { src: path.join(fontDir, "NotoSansJP-Bold.ttf"), fontWeight: 700 },
   ],
 });
+
+// Disable hyphenation (react-pdf default can break CJK text awkwardly).
+Font.registerHyphenationCallback((word) => [word]);
 
 const styles = StyleSheet.create({
   page: {
@@ -49,9 +49,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     marginTop: 16,
   },
-  table: {
-    marginBottom: 8,
-  },
+  table: { marginBottom: 8 },
   row: {
     flexDirection: "row",
     borderBottomWidth: 1,
@@ -101,14 +99,13 @@ function TableSection({ title, rows }: { title: string; rows?: Record<string, st
 }
 
 export function JobPdfDocument({ data }: { data: any }) {
+  const title = [data.companyName, data.jobTitle].filter(Boolean).join(" - ") || "求人票";
   return (
     <Document>
       <Page size="A4" style={styles.page}>
         <View style={styles.header}>
-          <Text style={styles.headerTitle}>
-            {data.companyName} {data.jobTitle ? `- ${data.jobTitle}` : ""}
-          </Text>
-          <Text style={styles.headerSub}>{data.summary || ""}</Text>
+          <Text style={styles.headerTitle}>{title}</Text>
+          {data.summary ? <Text style={styles.headerSub}>{data.summary}</Text> : null}
         </View>
 
         <TableSection title="募集概要" rows={data.overview} />

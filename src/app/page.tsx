@@ -26,10 +26,6 @@ export default function Home() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!companyName.trim() || !jobTitle.trim()) {
-      setError("会社名と職種は必須です");
-      return;
-    }
     setLoading(true);
     setError("");
     setResult(null);
@@ -77,15 +73,23 @@ export default function Home() {
         const txt = await res.text();
         throw new Error("PDF生成に失敗しました: " + txt);
       }
-      const blob = await res.blob();
+      const raw = await res.blob();
+      // Safari: force correct MIME type so the anchor download works.
+      const blob = new Blob([raw], { type: "application/pdf" });
+      const fileName = `求人票_${result.companyName || "job"}.pdf`;
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `求人票_${result.companyName || "unknown"}.pdf`;
+      a.download = fileName;
+      a.rel = "noopener";
+      a.target = "_blank"; // Safari fallback: opens in new tab if download attr ignored
       document.body.appendChild(a);
       a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      // Safari needs the anchor + object URL alive briefly after click.
+      setTimeout(() => {
+        a.remove();
+        URL.revokeObjectURL(url);
+      }, 1500);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -120,7 +124,7 @@ export default function Home() {
       <form onSubmit={handleSubmit} className="bg-white rounded-xl border shadow-sm p-6 mb-8 space-y-4">
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
-            会社名 <span className="text-red-600">*</span>
+            会社名（任意）
           </label>
           <input
             type="text"
@@ -144,7 +148,7 @@ export default function Home() {
         </div>
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
-            職種 <span className="text-red-600">*</span>
+            職種（任意）
           </label>
           <input
             type="text"
