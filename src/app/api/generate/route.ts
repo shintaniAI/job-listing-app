@@ -11,13 +11,39 @@ function getOpenAI() {
   return new OpenAI({ apiKey });
 }
 
+function isSafePublicUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+    const host = u.hostname.toLowerCase();
+    if (
+      host === "localhost" ||
+      host.endsWith(".localhost") ||
+      host === "0.0.0.0" ||
+      host === "::1" ||
+      /^127\./.test(host) ||
+      /^10\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^169\.254\./.test(host) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+      /^fc00:/i.test(host) ||
+      /^fe80:/i.test(host)
+    ) return false;
+    return true;
+  } catch { return false; }
+}
+
 async function fetchUrl(url: string): Promise<string> {
+  if (!isSafePublicUrl(url)) return "";
   try {
     const res = await fetch(url, {
       headers: { "User-Agent": "Mozilla/5.0 (compatible; JobListingBot/1.0)" },
       signal: AbortSignal.timeout(10000),
+      redirect: "follow",
     });
-    const html = await res.text();
+    const ct = res.headers.get("content-type") || "";
+    if (!/text\/html|application\/xhtml|text\/plain/i.test(ct)) return "";
+    const html = (await res.text()).slice(0, 500_000);
     const $ = cheerio.load(html);
     $("script, style, nav, footer, header, iframe, noscript").remove();
     return $("body").text().replace(/\s+/g, " ").trim().slice(0, 8000);
@@ -43,13 +69,22 @@ async function searchWeb(query: string): Promise<{ text: string; urls: string[] 
 }
 
 export async function POST(req: NextRequest) {
+  let body: any;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "リクエストボディが不正なJSONです" }, { status: 400 });
+  }
+  if (!body || typeof body !== "object") {
+    return NextResponse.json({ error: "リクエストボディが不正です" }, { status: 400 });
+  }
+  const cap = (v: any, n = 500) => (typeof v === "string" ? v.slice(0, n) : "");
   try {
     const openai = getOpenAI();
-    const body = await req.json();
-    const companyName: string = (body.companyName || "").trim();
-    const companyUrl: string = (body.companyUrl || "").trim();
-    const jobTitle: string = (body.jobTitle || "").trim();
-    const salary: string = (body.salary || "").trim();
+    const companyName: string = cap(body.companyName).trim();
+    const companyUrl: string = cap(body.companyUrl, 2000).trim();
+    const jobTitle: string = cap(body.jobTitle).trim();
+    const salary: string = cap(body.salary).trim();
 
     // All fields are optional. If nothing is provided, generate a generic template.
     let context = "";

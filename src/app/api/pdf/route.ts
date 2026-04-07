@@ -7,9 +7,15 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
+  let parsed: any;
   try {
-    const { jobData } = await req.json();
-    if (!jobData) {
+    parsed = await req.json();
+  } catch {
+    return NextResponse.json({ error: "リクエストボディが不正なJSONです" }, { status: 400 });
+  }
+  try {
+    const { jobData } = parsed || {};
+    if (!jobData || typeof jobData !== "object") {
       return NextResponse.json({ error: "データが必要です" }, { status: 400 });
     }
 
