@@ -124,8 +124,24 @@ export default function Home() {
       }
 
       const fileName = `求人票_${result.companyName || "job"}.pdf`;
-      // jsPDF .save() handles Safari/Chrome correctly.
-      pdf.save(fileName);
+      // Try multiple download strategies for Mac Chrome/Safari reliability.
+      try {
+        pdf.save(fileName);
+      } catch {
+        // Fallback 1: bloburl in new tab (Safari sometimes blocks anchor download)
+        const blob = pdf.output("blob") as Blob;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = fileName;
+        a.rel = "noopener";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          a.remove();
+          URL.revokeObjectURL(url);
+        }, 2000);
+      }
     } catch (err: any) {
       console.error(err);
       setError("PDF生成に失敗しました: " + (err?.message || String(err)));
@@ -133,6 +149,85 @@ export default function Home() {
     } finally {
       setPdfGenerating(false);
     }
+  };
+
+  // Guaranteed fallback: open a new window with formatted HTML and call window.print().
+  // Uses the browser's native "Save as PDF" — works on Mac Chrome & Safari unconditionally.
+  const handlePrintPdf = () => {
+    if (!result) return;
+    const title = [result.companyName, result.jobTitle].filter(Boolean).join(" - ") || "求人票";
+    const sections: { title: string; rows: Record<string, string> }[] = [
+      { title: "募集概要", rows: result.overview || {} },
+      { title: "仕事内容", rows: result.jobContent || {} },
+      { title: "募集要項", rows: result.requirements || {} },
+      { title: "仕事環境", rows: result.environment || {} },
+    ].filter((s) => Object.keys(s.rows).length > 0);
+
+    const esc = (s: string) =>
+      s
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+
+    const sectionsHtml = sections
+      .map(
+        (s) => `
+      <div class="section">
+        <h2>${esc(s.title)}</h2>
+        <table>
+          <tbody>
+            ${Object.entries(s.rows)
+              .map(
+                ([k, v]) =>
+                  `<tr><th>${esc(k)}</th><td>${esc(v || "—")}</td></tr>`
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>`
+      )
+      .join("");
+
+    const html = `<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>${esc(
+      title
+    )}</title><style>
+      @page { size: A4; margin: 14mm; }
+      * { box-sizing: border-box; }
+      body { font-family: "Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic","Meiryo","Noto Sans JP",system-ui,sans-serif; color:#222; font-size:12px; line-height:1.65; margin:0; padding:24px; }
+      .header { background:#1e40af; color:#fff; padding:16px 20px; border-radius:6px; margin-bottom:20px; }
+      .header h1 { font-size:20px; margin:0 0 4px; }
+      .header p { font-size:12px; margin:0; opacity:0.92; }
+      .section { margin-bottom:18px; page-break-inside: avoid; }
+      .section h2 { font-size:13px; color:#1e40af; border-bottom:2px solid #1e40af; padding-bottom:4px; margin:0 0 8px; }
+      table { width:100%; border-collapse:collapse; }
+      th, td { padding:8px 10px; font-size:11px; vertical-align:top; border-bottom:1px solid #e5e7eb; }
+      th { width:26%; background:#f3f4f6; color:#4b5563; font-weight:700; text-align:left; }
+      td { white-space:pre-wrap; }
+      .footer { margin-top:24px; text-align:center; font-size:9px; color:#9ca3af; }
+      @media print { body { padding:0; } }
+    </style></head><body>
+      <div class="header">
+        <h1>${esc(title)}</h1>
+        ${result.summary ? `<p>${esc(result.summary)}</p>` : ""}
+      </div>
+      ${sectionsHtml}
+      <div class="footer">この求人票はAIにより自動生成されました。内容は参考情報です。</div>
+      <script>
+        window.addEventListener('load', function(){
+          setTimeout(function(){ window.focus(); window.print(); }, 200);
+        });
+      </script>
+    </body></html>`;
+
+    const w = window.open("", "_blank");
+    if (!w) {
+      setError("ポップアップがブロックされています。ブラウザのポップアップ許可を確認してください。");
+      return;
+    }
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
   };
 
   const updateField = (key: keyof JobData, value: string) => {
@@ -295,14 +390,25 @@ export default function Home() {
             </div>
           )}
 
-          <div className="text-center">
-            <button
-              onClick={handleDownloadPdf}
-              disabled={pdfGenerating}
-              className="bg-green-600 text-white px-8 py-3 rounded-lg font-medium hover:bg-green-700 disabled:opacity-50"
-            >
-              {pdfGenerating ? "PDF生成中..." : "📥 PDFダウンロード"}
-            </button>
+          <div className="text-center space-y-3">
+            <div className="flex flex-wrap gap-3 justify-center">
+              <button
+                onClick={handleDownloadPdf}
+                disabled={pdfGenerating}
+                className="bg-green-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-green-700 disabled:opacity-50"
+              >
+                {pdfGenerating ? "PDF生成中..." : "📥 PDFダウンロード"}
+              </button>
+              <button
+                onClick={handlePrintPdf}
+                className="bg-blue-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-blue-700"
+              >
+                🖨 印刷 / PDFとして保存
+              </button>
+            </div>
+            <p className="text-xs text-gray-500">
+              ダウンロードが動かない場合は「印刷 / PDFとして保存」をお使いください（Mac標準の「PDFとして保存」が使えます）
+            </p>
           </div>
 
           {/* Hidden print layout used by html2canvas */}
