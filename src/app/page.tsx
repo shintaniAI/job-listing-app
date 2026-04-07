@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState, useRef } from "react";
 
 type JobData = {
   companyName: string;
@@ -23,6 +23,7 @@ export default function Home() {
   const [result, setResult] = useState<JobData | null>(null);
   const [error, setError] = useState("");
   const [pdfGenerating, setPdfGenerating] = useState(false);
+  const printRef = useRef<HTMLDivElement>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -61,37 +62,74 @@ export default function Home() {
 
   const handleDownloadPdf = async () => {
     if (!result) return;
+    const node = printRef.current;
+    if (!node) return;
     setPdfGenerating(true);
     setError("");
     try {
-      const res = await fetch("/api/pdf", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobData: result }),
+      // Client-side PDF generation (Mac Safari/Chrome compatible).
+      // Browser rasterizes text → no font embedding needed.
+      const [{ default: html2canvas }, jsPDFmod] = await Promise.all([
+        import("html2canvas"),
+        import("jspdf"),
+      ]);
+      const JsPDF = (jsPDFmod as any).jsPDF || (jsPDFmod as any).default;
+
+      // Make the hidden node visible to the layout engine temporarily.
+      node.style.display = "block";
+      // Force reflow for Safari
+      void node.offsetHeight;
+
+      const canvas = await html2canvas(node, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: "#ffffff",
+        windowWidth: node.scrollWidth,
       });
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error("PDF生成に失敗しました: " + txt);
+
+      node.style.display = "none";
+
+      const imgData = canvas.toDataURL("image/png");
+      const pdf = new JsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+      const pageW = pdf.internal.pageSize.getWidth();
+      const pageH = pdf.internal.pageSize.getHeight();
+      const margin = 10;
+      const imgW = pageW - margin * 2;
+      const imgH = (canvas.height * imgW) / canvas.width;
+
+      if (imgH <= pageH - margin * 2) {
+        pdf.addImage(imgData, "PNG", margin, margin, imgW, imgH);
+      } else {
+        // Multi-page: slice the canvas vertically.
+        const pageContentH = pageH - margin * 2;
+        const pxPerMm = canvas.width / imgW;
+        const sliceHpx = Math.floor(pageContentH * pxPerMm);
+        let yPx = 0;
+        let first = true;
+        while (yPx < canvas.height) {
+          const h = Math.min(sliceHpx, canvas.height - yPx);
+          const slice = document.createElement("canvas");
+          slice.width = canvas.width;
+          slice.height = h;
+          const ctx = slice.getContext("2d")!;
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, slice.width, slice.height);
+          ctx.drawImage(canvas, 0, yPx, canvas.width, h, 0, 0, canvas.width, h);
+          const sliceData = slice.toDataURL("image/png");
+          if (!first) pdf.addPage();
+          pdf.addImage(sliceData, "PNG", margin, margin, imgW, (h / pxPerMm));
+          first = false;
+          yPx += h;
+        }
       }
-      const raw = await res.blob();
-      // Safari: force correct MIME type so the anchor download works.
-      const blob = new Blob([raw], { type: "application/pdf" });
+
       const fileName = `求人票_${result.companyName || "job"}.pdf`;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = fileName;
-      a.rel = "noopener";
-      a.target = "_blank"; // Safari fallback: opens in new tab if download attr ignored
-      document.body.appendChild(a);
-      a.click();
-      // Safari needs the anchor + object URL alive briefly after click.
-      setTimeout(() => {
-        a.remove();
-        URL.revokeObjectURL(url);
-      }, 1500);
+      // jsPDF .save() handles Safari/Chrome correctly.
+      pdf.save(fileName);
     } catch (err: any) {
-      setError(err.message);
+      console.error(err);
+      setError("PDF生成に失敗しました: " + (err?.message || String(err)));
+      if (node) node.style.display = "none";
     } finally {
       setPdfGenerating(false);
     }
@@ -266,11 +304,93 @@ export default function Home() {
               {pdfGenerating ? "PDF生成中..." : "📥 PDFダウンロード"}
             </button>
           </div>
+
+          {/* Hidden print layout used by html2canvas */}
+          <PrintLayout ref={printRef} data={result} />
         </div>
       )}
     </main>
   );
 }
+
+const PrintLayout = React.forwardRef<HTMLDivElement, { data: JobData }>(function PrintLayout({ data }, ref) {
+  const title = [data.companyName, data.jobTitle].filter(Boolean).join(" - ") || "求人票";
+  const sections: { title: string; rows: Record<string, string> }[] = [
+    { title: "募集概要", rows: data.overview || {} },
+    { title: "仕事内容", rows: data.jobContent || {} },
+    { title: "募集要項", rows: data.requirements || {} },
+    { title: "仕事環境", rows: data.environment || {} },
+  ].filter((s) => Object.keys(s.rows).length > 0);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        display: "none",
+        position: "absolute",
+        left: "-10000px",
+        top: 0,
+        width: "794px", // ~A4 @ 96dpi
+        padding: "32px",
+        background: "#ffffff",
+        color: "#222",
+        fontFamily:
+          '"Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", "Noto Sans JP", system-ui, sans-serif',
+        fontSize: "12px",
+        lineHeight: 1.6,
+        boxSizing: "border-box",
+      }}
+    >
+      <div style={{ background: "#1e40af", color: "#fff", padding: "16px 20px", borderRadius: 6, marginBottom: 20 }}>
+        <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>{title}</div>
+        {data.summary ? <div style={{ fontSize: 12, opacity: 0.92 }}>{data.summary}</div> : null}
+      </div>
+      {sections.map((s) => (
+        <div key={s.title} style={{ marginBottom: 16 }}>
+          <div
+            style={{
+              fontSize: 13,
+              fontWeight: 700,
+              color: "#1e40af",
+              borderBottom: "2px solid #1e40af",
+              paddingBottom: 4,
+              marginBottom: 8,
+            }}
+          >
+            {s.title}
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <tbody>
+              {Object.entries(s.rows).map(([k, v]) => (
+                <tr key={k} style={{ borderBottom: "1px solid #e5e7eb" }}>
+                  <td
+                    style={{
+                      width: "26%",
+                      background: "#f3f4f6",
+                      padding: "8px 10px",
+                      fontWeight: 700,
+                      fontSize: 11,
+                      color: "#4b5563",
+                      verticalAlign: "top",
+                    }}
+                  >
+                    {k}
+                  </td>
+                  <td style={{ padding: "8px 10px", fontSize: 11, verticalAlign: "top", whiteSpace: "pre-wrap" }}>
+                    {v || "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+      <div style={{ marginTop: 24, textAlign: "center", fontSize: 9, color: "#9ca3af" }}>
+        この求人票はAIにより自動生成されました。内容は参考情報です。
+      </div>
+    </div>
+  );
+});
 
 function LabeledInput({
   label,
