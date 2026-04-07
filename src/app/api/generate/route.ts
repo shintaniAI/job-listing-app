@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import * as cheerio from "cheerio";
 
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
 function getOpenAI() {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY が設定されていません");
@@ -23,69 +26,63 @@ async function fetchUrl(url: string): Promise<string> {
   }
 }
 
-async function searchWeb(query: string): Promise<string> {
-  // Use Google Custom Search or SerpAPI if available, fallback to direct scraping hints
+async function searchWeb(query: string): Promise<{ text: string; urls: string[] }> {
   const serpApiKey = process.env.SERPAPI_KEY;
-  if (serpApiKey) {
-    try {
-      const url = `https://serpapi.com/search.json?q=${encodeURIComponent(query + " 求人")}&hl=ja&gl=jp&api_key=${serpApiKey}`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-      const data = await res.json();
-      const results = (data.organic_results || []).slice(0, 5);
-      return results.map((r: any) => `${r.title}\n${r.snippet}\n${r.link}`).join("\n\n");
-    } catch {
-      return "";
-    }
-  }
-  return "";
-}
-
-function isUrl(s: string): boolean {
+  if (!serpApiKey) return { text: "", urls: [] };
   try {
-    new URL(s);
-    return true;
+    const url = `https://serpapi.com/search.json?q=${encodeURIComponent(query + " 求人")}&hl=ja&gl=jp&api_key=${serpApiKey}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    const data = await res.json();
+    const results = (data.organic_results || []).slice(0, 5);
+    const text = results.map((r: any) => `${r.title}\n${r.snippet}\n${r.link}`).join("\n\n");
+    const urls = results.map((r: any) => r.link).filter(Boolean);
+    return { text, urls };
   } catch {
-    return false;
+    return { text: "", urls: [] };
   }
 }
 
 export async function POST(req: NextRequest) {
   try {
     const openai = getOpenAI();
-    const { query } = await req.json();
-    if (!query) return NextResponse.json({ error: "入力が必要です" }, { status: 400 });
+    const body = await req.json();
+    const companyName: string = (body.companyName || "").trim();
+    const companyUrl: string = (body.companyUrl || "").trim();
+    const jobTitle: string = (body.jobTitle || "").trim();
+    const salary: string = (body.salary || "").trim();
+
+    if (!companyName) return NextResponse.json({ error: "会社名は必須です" }, { status: 400 });
+    if (!jobTitle) return NextResponse.json({ error: "職種は必須です" }, { status: 400 });
 
     let context = "";
     const sources: string[] = [];
 
-    if (isUrl(query)) {
-      context = await fetchUrl(query);
-      if (!context) {
-        return NextResponse.json({ error: "URLからの情報取得に失敗しました" }, { status: 400 });
+    if (companyUrl) {
+      const scraped = await fetchUrl(companyUrl);
+      if (scraped) {
+        context = scraped;
+        sources.push(companyUrl);
       }
-      sources.push(query);
-    } else {
-      // Search for job info
-      const searchResults = await searchWeb(query);
-      
-      if (!searchResults) {
+    }
+
+    if (!context) {
+      const { text, urls } = await searchWeb(`${companyName} ${jobTitle}`);
+      if (!text) {
         return NextResponse.json(
-          { error: "求人情報を取得できませんでした。URLを直接入力するか、検索API（SERPAPI_KEY）を設定してください。" },
+          { error: "外部ソースから情報を取得できませんでした。会社HP URLを入力するか、SerpAPI設定を確認してください。" },
           { status: 400 }
         );
       }
-      // Extract URLs from search results
-      const urlMatches = searchResults.match(/https?:\/\/[^\s]+/g);
-      if (urlMatches) sources.push(...urlMatches.slice(0, 5));
-      context = searchResults;
+      context = text;
+      sources.push(...urls);
     }
 
-    const systemPrompt = `あなたは求人票作成の専門家です。与えられた情報から、以下のJSON形式で求人票データを生成してください。
-情報が不足している場合は、一般的な内容で補完してください。必ず日本語で出力してください。
+    const systemPrompt = `あなたは求人票作成の専門家です。与えられた外部情報を元に、以下のJSON形式で求人票データを生成してください。
+情報が不足している部分は一般的な内容で補完してかまいませんが、会社名と職種は指定されたものを必ず使用してください。必ず日本語で出力してください。
 
 出力JSON形式:
 {
-  "companyName": "会社名/クリニック名",
+  "companyName": "会社名",
   "jobTitle": "職種名",
   "summary": "募集概要（1-2文）",
   "overview": {
@@ -95,7 +92,7 @@ export async function POST(req: NextRequest) {
   },
   "jobContent": {
     "仕事内容": "主な業務内容の説明",
-    "どんなクリニック？": "アピールポイント、特徴、雰囲気など"
+    "どんな会社？": "アピールポイント、特徴、雰囲気など"
   },
   "requirements": {
     "雇用形態": "...",
@@ -110,14 +107,18 @@ export async function POST(req: NextRequest) {
   }
 }`;
 
+    const userPrompt = `会社名: ${companyName}
+職種: ${jobTitle}
+${salary ? `給与（そのまま overview.給与 に設定）: ${salary}` : ""}
+
+外部ソースから収集した情報:
+${context}`;
+
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: systemPrompt },
-        {
-          role: "user",
-          content: `以下の情報から求人票を作成してください:\n\n${context}`,
-        },
+        { role: "user", content: userPrompt },
       ],
       response_format: { type: "json_object" },
       temperature: 0.3,
@@ -127,6 +128,13 @@ export async function POST(req: NextRequest) {
     if (!content) throw new Error("AI応答が空です");
 
     const jobData = JSON.parse(content);
+    // Enforce user-specified fields
+    jobData.companyName = companyName;
+    jobData.jobTitle = jobTitle;
+    if (salary) {
+      jobData.overview = jobData.overview || {};
+      jobData.overview["給与"] = salary;
+    }
     jobData.sources = sources;
     return NextResponse.json(jobData);
   } catch (err: any) {

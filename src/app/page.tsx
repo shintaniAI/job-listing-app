@@ -2,29 +2,60 @@
 
 import { useState } from "react";
 
+type JobData = {
+  companyName: string;
+  jobTitle: string;
+  summary: string;
+  overview: Record<string, string>;
+  jobContent: Record<string, string>;
+  requirements: Record<string, string>;
+  environment: Record<string, string>;
+  sources?: string[];
+};
+
 export default function Home() {
-  const [input, setInput] = useState("");
+  const [companyName, setCompanyName] = useState("");
+  const [companyUrl, setCompanyUrl] = useState("");
+  const [jobTitle, setJobTitle] = useState("");
+  const [salary, setSalary] = useState("");
+
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<JobData | null>(null);
   const [error, setError] = useState("");
   const [pdfGenerating, setPdfGenerating] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim()) return;
+    if (!companyName.trim() || !jobTitle.trim()) {
+      setError("会社名と職種は必須です");
+      return;
+    }
     setLoading(true);
     setError("");
     setResult(null);
-
     try {
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: input.trim() }),
+        body: JSON.stringify({
+          companyName: companyName.trim(),
+          companyUrl: companyUrl.trim(),
+          jobTitle: jobTitle.trim(),
+          salary: salary.trim(),
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "エラーが発生しました");
-      setResult(data);
+      setResult({
+        companyName: data.companyName || "",
+        jobTitle: data.jobTitle || "",
+        summary: data.summary || "",
+        overview: data.overview || {},
+        jobContent: data.jobContent || {},
+        requirements: data.requirements || {},
+        environment: data.environment || {},
+        sources: data.sources || [],
+      });
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -35,19 +66,25 @@ export default function Home() {
   const handleDownloadPdf = async () => {
     if (!result) return;
     setPdfGenerating(true);
+    setError("");
     try {
       const res = await fetch("/api/pdf", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ jobData: result }),
       });
-      if (!res.ok) throw new Error("PDF生成に失敗しました");
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error("PDF生成に失敗しました: " + txt);
+      }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = `求人票_${result.companyName || "unknown"}.pdf`;
+      document.body.appendChild(a);
       a.click();
+      a.remove();
       URL.revokeObjectURL(url);
     } catch (err: any) {
       setError(err.message);
@@ -56,27 +93,85 @@ export default function Home() {
     }
   };
 
+  const updateField = (key: keyof JobData, value: string) => {
+    if (!result) return;
+    setResult({ ...result, [key]: value } as JobData);
+  };
+
+  const updateSection = (
+    section: "overview" | "jobContent" | "requirements" | "environment",
+    key: string,
+    value: string
+  ) => {
+    if (!result) return;
+    setResult({
+      ...result,
+      [section]: { ...result[section], [key]: value },
+    });
+  };
+
   return (
     <main className="max-w-3xl mx-auto px-4 py-12">
       <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成</h1>
       <p className="text-center text-gray-500 mb-8">
-        求人ページのURLを入力、または会社名でWeb検索して求人情報を収集・整理しPDFを生成します
+        会社情報を入力 → 外部ソースから収集 → 編集 → PDF出力
       </p>
 
-      <form onSubmit={handleSubmit} className="flex gap-3 mb-8">
-        <input
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="例: 〇〇クリニック / https://example.com/jobs/123"
-          className="flex-1 border border-gray-300 rounded-lg px-4 py-3 text-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-        />
+      <form onSubmit={handleSubmit} className="bg-white rounded-xl border shadow-sm p-6 mb-8 space-y-4">
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            会社名 <span className="text-red-600">*</span>
+          </label>
+          <input
+            type="text"
+            value={companyName}
+            onChange={(e) => setCompanyName(e.target.value)}
+            placeholder="例: 〇〇クリニック"
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            会社HP URL（任意）
+          </label>
+          <input
+            type="url"
+            value={companyUrl}
+            onChange={(e) => setCompanyUrl(e.target.value)}
+            placeholder="https://example.com（未入力ならSerpAPIで会社名検索）"
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            職種 <span className="text-red-600">*</span>
+          </label>
+          <input
+            type="text"
+            value={jobTitle}
+            onChange={(e) => setJobTitle(e.target.value)}
+            placeholder="例: 看護師 / フロントエンドエンジニア"
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            給与（任意）
+          </label>
+          <input
+            type="text"
+            value={salary}
+            onChange={(e) => setSalary(e.target.value)}
+            placeholder="例: 月給28万円〜35万円"
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
         <button
           type="submit"
           disabled={loading}
-          className="bg-blue-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="w-full bg-blue-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50"
         >
-          {loading ? "生成中..." : "生成"}
+          {loading ? "生成中..." : "求人票を生成"}
         </button>
       </form>
 
@@ -88,33 +183,67 @@ export default function Home() {
       )}
 
       {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-4 mb-6">
+        <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-4 mb-6 whitespace-pre-wrap">
           {error}
         </div>
       )}
 
       {result && (
         <div className="space-y-6">
-          <div className="bg-white rounded-xl shadow-sm border p-6">
-            <h2 className="text-xl font-bold text-blue-800 mb-1">
-              {result.companyName} {result.jobTitle && `- ${result.jobTitle}`}
-            </h2>
-            <p className="text-gray-500 text-sm mb-4">{result.summary}</p>
+          <div className="bg-white rounded-xl shadow-sm border p-6 space-y-4">
+            <p className="text-xs text-gray-500">✏️ 各項目は直接編集できます。編集後の内容でPDFが生成されます。</p>
 
-            <Section title="募集概要" rows={result.overview} />
-            <Section title="仕事内容" rows={result.jobContent} />
-            <Section title="募集要項" rows={result.requirements} />
-            <Section title="仕事環境" rows={result.environment} />
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <LabeledInput
+                label="会社名"
+                value={result.companyName}
+                onChange={(v) => updateField("companyName", v)}
+              />
+              <LabeledInput
+                label="職種"
+                value={result.jobTitle}
+                onChange={(v) => updateField("jobTitle", v)}
+              />
+            </div>
+            <LabeledTextarea
+              label="募集概要（summary）"
+              value={result.summary}
+              onChange={(v) => updateField("summary", v)}
+              rows={2}
+            />
+
+            <EditableSection
+              title="募集概要"
+              rows={result.overview}
+              onChange={(k, v) => updateSection("overview", k, v)}
+            />
+            <EditableSection
+              title="仕事内容"
+              rows={result.jobContent}
+              onChange={(k, v) => updateSection("jobContent", k, v)}
+            />
+            <EditableSection
+              title="募集要項"
+              rows={result.requirements}
+              onChange={(k, v) => updateSection("requirements", k, v)}
+            />
+            <EditableSection
+              title="仕事環境"
+              rows={result.environment}
+              onChange={(k, v) => updateSection("environment", k, v)}
+            />
           </div>
 
           {result.sources && result.sources.length > 0 && (
             <div className="bg-gray-50 rounded-lg border p-4">
-              <h3 className="font-bold text-gray-700 text-sm mb-2">📎 情報ソース</h3>
+              <h3 className="font-bold text-gray-700 text-sm mb-2">📎 情報ソース（PDFには含まれません）</h3>
               <ul className="text-sm text-gray-500 space-y-1">
-                {result.sources.map((src: string, i: number) => (
+                {result.sources.map((src, i) => (
                   <li key={i}>
                     {src.startsWith("http") ? (
-                      <a href={src} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline break-all">{src}</a>
+                      <a href={src} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline break-all">
+                        {src}
+                      </a>
                     ) : (
                       <span>{src}</span>
                     )}
@@ -139,23 +268,79 @@ export default function Home() {
   );
 }
 
-function Section({ title, rows }: { title: string; rows?: Record<string, string> }) {
-  if (!rows || Object.keys(rows).length === 0) return null;
+function LabeledInput({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+}) {
   return (
-    <div className="mb-4">
+    <div>
+      <label className="block text-xs font-medium text-gray-600 mb-1">{label}</label>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+      />
+    </div>
+  );
+}
+
+function LabeledTextarea({
+  label,
+  value,
+  onChange,
+  rows = 3,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  rows?: number;
+}) {
+  return (
+    <div>
+      <label className="block text-xs font-medium text-gray-600 mb-1">{label}</label>
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        rows={rows}
+        className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+      />
+    </div>
+  );
+}
+
+function EditableSection({
+  title,
+  rows,
+  onChange,
+}: {
+  title: string;
+  rows: Record<string, string>;
+  onChange: (key: string, value: string) => void;
+}) {
+  const entries = Object.entries(rows || {});
+  if (entries.length === 0) return null;
+  return (
+    <div>
       <h3 className="font-bold text-gray-800 border-b-2 border-blue-600 pb-1 mb-2">{title}</h3>
-      <table className="w-full text-sm">
-        <tbody>
-          {Object.entries(rows).map(([key, val]) => (
-            <tr key={key} className="border-b border-gray-100">
-              <td className="py-2 pr-4 font-medium text-gray-600 w-1/4 align-top whitespace-nowrap">
-                {key}
-              </td>
-              <td className="py-2 text-gray-800 whitespace-pre-wrap">{val}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="space-y-2">
+        {entries.map(([key, val]) => (
+          <div key={key} className="flex flex-col md:flex-row gap-2">
+            <div className="md:w-1/4 text-sm font-medium text-gray-600 pt-2">{key}</div>
+            <textarea
+              value={val}
+              onChange={(e) => onChange(key, e.target.value)}
+              rows={Math.max(2, Math.min(6, (val || "").split("\n").length + 1))}
+              className="flex-1 border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import ReactPDF from "@react-pdf/renderer";
+import React from "react";
+import { renderToBuffer } from "@react-pdf/renderer";
 import { JobPdfDocument } from "@/lib/pdf-template";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   try {
@@ -9,22 +13,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "データが必要です" }, { status: 400 });
     }
 
-    const stream = await ReactPDF.renderToStream(JobPdfDocument({ data: jobData }));
+    // Exclude sources from PDF output
+    const { sources: _omit, ...pdfData } = jobData;
 
-    const chunks: Buffer[] = [];
-    for await (const chunk of stream as any) {
-      chunks.push(Buffer.from(chunk));
-    }
-    const pdfBuffer = Buffer.concat(chunks);
+    const element: any = React.createElement(JobPdfDocument as any, { data: pdfData });
+    const pdfBuffer = await renderToBuffer(element);
 
-    return new NextResponse(pdfBuffer, {
+    return new NextResponse(pdfBuffer as any, {
       headers: {
         "Content-Type": "application/pdf",
         "Content-Disposition": `attachment; filename="job_listing.pdf"`,
+        "Cache-Control": "no-store",
       },
     });
   } catch (err: any) {
     console.error("PDF error:", err);
-    return NextResponse.json({ error: "PDF生成に失敗しました: " + err.message }, { status: 500 });
+    return NextResponse.json(
+      { error: "PDF生成に失敗しました: " + (err?.message || String(err)) },
+      { status: 500 }
+    );
   }
 }
