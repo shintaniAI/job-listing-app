@@ -12,8 +12,17 @@ type JobData = {
   jobContent: Record<string, string>;
   requirements: Record<string, string>;
   environment: Record<string, string>;
+  extra: Record<string, string>;
   sources?: string[];
 };
+
+const SECTION_DEFS: { key: keyof JobData; title: string }[] = [
+  { key: "overview", title: "募集概要" },
+  { key: "jobContent", title: "仕事内容" },
+  { key: "requirements", title: "募集要項" },
+  { key: "environment", title: "仕事環境" },
+  { key: "extra", title: "その他" },
+];
 
 export default function Home() {
   const [companyName, setCompanyName] = useState("");
@@ -94,6 +103,7 @@ export default function Home() {
         jobContent: data.jobContent || {},
         requirements: data.requirements || {},
         environment: data.environment || {},
+        extra: data.extra || {},
         sources: data.sources || [],
       });
     } catch (err: any) {
@@ -199,12 +209,9 @@ export default function Home() {
   const handlePrintPdf = () => {
     if (!result) return;
     const title = [result.companyName, result.jobTitle].filter(Boolean).join(" - ") || "求人票";
-    const sections: { title: string; rows: Record<string, string> }[] = [
-      { title: "募集概要", rows: result.overview || {} },
-      { title: "仕事内容", rows: result.jobContent || {} },
-      { title: "募集要項", rows: result.requirements || {} },
-      { title: "仕事環境", rows: result.environment || {} },
-    ].filter((s) => Object.keys(s.rows).length > 0);
+    const sections: { title: string; rows: Record<string, string> }[] = SECTION_DEFS
+      .map(({ key, title }) => ({ title, rows: ((result as any)[key] || {}) as Record<string, string> }))
+      .filter((s) => Object.keys(s.rows).length > 0);
 
     const esc = (s: string) =>
       s
@@ -277,16 +284,39 @@ export default function Home() {
     setResult({ ...result, [key]: value } as JobData);
   };
 
-  const updateSection = (
-    section: "overview" | "jobContent" | "requirements" | "environment",
-    key: string,
-    value: string
-  ) => {
+  type SectionKey = "overview" | "jobContent" | "requirements" | "environment" | "extra";
+
+  const updateSectionValue = (section: SectionKey, key: string, value: string) => {
     if (!result) return;
-    setResult({
-      ...result,
-      [section]: { ...result[section], [key]: value },
-    });
+    setResult({ ...result, [section]: { ...result[section], [key]: value } });
+  };
+
+  const renameSectionKey = (section: SectionKey, oldKey: string, newKey: string) => {
+    if (!result) return;
+    if (!newKey.trim() || oldKey === newKey) return;
+    const src = result[section] || {};
+    if (newKey in src) return; // avoid collision
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(src)) out[k === oldKey ? newKey : k] = v;
+    setResult({ ...result, [section]: out });
+  };
+
+  const deleteSectionRow = (section: SectionKey, key: string) => {
+    if (!result) return;
+    const src = { ...(result[section] || {}) };
+    delete src[key];
+    setResult({ ...result, [section]: src });
+  };
+
+  const addSectionRow = (section: SectionKey) => {
+    if (!result) return;
+    const src = { ...(result[section] || {}) };
+    let base = "新しい項目";
+    let name = base;
+    let i = 2;
+    while (name in src) name = `${base}${i++}`;
+    src[name] = "";
+    setResult({ ...result, [section]: src });
   };
 
   return (
@@ -391,26 +421,17 @@ export default function Home() {
               rows={2}
             />
 
-            <EditableSection
-              title="募集概要"
-              rows={result.overview}
-              onChange={(k, v) => updateSection("overview", k, v)}
-            />
-            <EditableSection
-              title="仕事内容"
-              rows={result.jobContent}
-              onChange={(k, v) => updateSection("jobContent", k, v)}
-            />
-            <EditableSection
-              title="募集要項"
-              rows={result.requirements}
-              onChange={(k, v) => updateSection("requirements", k, v)}
-            />
-            <EditableSection
-              title="仕事環境"
-              rows={result.environment}
-              onChange={(k, v) => updateSection("environment", k, v)}
-            />
+            {SECTION_DEFS.map(({ key, title }) => (
+              <EditableSection
+                key={key}
+                title={title}
+                rows={(result[key] as Record<string, string>) || {}}
+                onChangeValue={(k, v) => updateSectionValue(key as SectionKey, k, v)}
+                onRenameKey={(oldK, newK) => renameSectionKey(key as SectionKey, oldK, newK)}
+                onDeleteRow={(k) => deleteSectionRow(key as SectionKey, k)}
+                onAddRow={() => addSectionRow(key as SectionKey)}
+              />
+            ))}
           </div>
 
           {result.sources && result.sources.length > 0 && (
@@ -469,12 +490,9 @@ export default function Home() {
 
 const PrintLayout = React.forwardRef<HTMLDivElement, { data: JobData }>(function PrintLayout({ data }, ref) {
   const title = [data.companyName, data.jobTitle].filter(Boolean).join(" - ") || "求人票";
-  const sections: { title: string; rows: Record<string, string> }[] = [
-    { title: "募集概要", rows: data.overview || {} },
-    { title: "仕事内容", rows: data.jobContent || {} },
-    { title: "募集要項", rows: data.requirements || {} },
-    { title: "仕事環境", rows: data.environment || {} },
-  ].filter((s) => Object.keys(s.rows).length > 0);
+  const sections: { title: string; rows: Record<string, string> }[] = SECTION_DEFS
+    .map(({ key, title }) => ({ title, rows: ((data as any)[key] || {}) as Record<string, string> }))
+    .filter((s) => Object.keys(s.rows).length > 0);
 
   return (
     <div
@@ -592,30 +610,103 @@ function LabeledTextarea({
 function EditableSection({
   title,
   rows,
-  onChange,
+  onChangeValue,
+  onRenameKey,
+  onDeleteRow,
+  onAddRow,
 }: {
   title: string;
   rows: Record<string, string>;
-  onChange: (key: string, value: string) => void;
+  onChangeValue: (key: string, value: string) => void;
+  onRenameKey: (oldKey: string, newKey: string) => void;
+  onDeleteRow: (key: string) => void;
+  onAddRow: () => void;
 }) {
   const entries = Object.entries(rows || {});
-  if (entries.length === 0) return null;
   return (
     <div>
-      <h3 className="font-bold text-gray-800 border-b-2 border-blue-600 pb-1 mb-2">{title}</h3>
-      <div className="space-y-2">
-        {entries.map(([key, val]) => (
-          <div key={key} className="flex flex-col md:flex-row gap-2">
-            <div className="md:w-1/4 text-sm font-medium text-gray-600 pt-2">{key}</div>
-            <textarea
-              value={val}
-              onChange={(e) => onChange(key, e.target.value)}
-              rows={Math.max(2, Math.min(6, (val || "").split("\n").length + 1))}
-              className="flex-1 border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-        ))}
+      <div className="flex items-center justify-between border-b-2 border-blue-600 pb-1 mb-2">
+        <h3 className="font-bold text-gray-800">{title}</h3>
+        <button
+          type="button"
+          onClick={onAddRow}
+          className="text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded px-2 py-1"
+        >
+          ＋項目を追加
+        </button>
       </div>
+      {entries.length === 0 ? (
+        <p className="text-xs text-gray-400 italic mb-2">項目がありません。「＋項目を追加」から追加できます。</p>
+      ) : (
+        <div className="space-y-2">
+          {entries.map(([key, val], idx) => (
+            <KeyValueRow
+              key={`${idx}-${key}`}
+              rowKey={key}
+              value={val}
+              onChangeValue={(v) => onChangeValue(key, v)}
+              onRenameKey={(newK) => onRenameKey(key, newK)}
+              onDelete={() => onDeleteRow(key)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function KeyValueRow({
+  rowKey,
+  value,
+  onChangeValue,
+  onRenameKey,
+  onDelete,
+}: {
+  rowKey: string;
+  value: string;
+  onChangeValue: (v: string) => void;
+  onRenameKey: (newKey: string) => void;
+  onDelete: () => void;
+}) {
+  const [localKey, setLocalKey] = React.useState(rowKey);
+  React.useEffect(() => setLocalKey(rowKey), [rowKey]);
+  const commitKey = () => {
+    const trimmed = localKey.trim();
+    if (!trimmed) {
+      setLocalKey(rowKey);
+      return;
+    }
+    if (trimmed !== rowKey) onRenameKey(trimmed);
+  };
+  return (
+    <div className="flex flex-col md:flex-row gap-2 items-start">
+      <input
+        type="text"
+        value={localKey}
+        onChange={(e) => setLocalKey(e.target.value)}
+        onBlur={commitKey}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            (e.target as HTMLInputElement).blur();
+          }
+        }}
+        className="md:w-1/4 border border-gray-200 bg-gray-50 rounded px-2 py-1.5 text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+      />
+      <textarea
+        value={value}
+        onChange={(e) => onChangeValue(e.target.value)}
+        rows={Math.max(2, Math.min(6, (value || "").split("\n").length + 1))}
+        className="flex-1 border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+      />
+      <button
+        type="button"
+        onClick={onDelete}
+        title="この項目を削除"
+        className="text-red-500 hover:bg-red-50 border border-red-200 rounded px-2 py-1.5 text-sm"
+      >
+        🗑
+      </button>
     </div>
   );
 }
