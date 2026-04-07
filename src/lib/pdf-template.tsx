@@ -113,9 +113,6 @@ export function JobPdfDocument({ data }: { data: any }) {
         <TableSection title="募集要項" rows={data.requirements} />
         <TableSection title="仕事環境" rows={data.environment} />
 
-        <Text style={styles.footer}>
-          この求人票はAIにより自動生成されました。内容は参考情報です。
-        </Text>
       </Page>
     </Document>
   );

@@ -212,7 +212,6 @@ export default function Home() {
         ${result.summary ? `<p>${esc(result.summary)}</p>` : ""}
       </div>
       ${sectionsHtml}
-      <div class="footer">この求人票はAIにより自動生成されました。内容は参考情報です。</div>
       <script>
         window.addEventListener('load', function(){
           setTimeout(function(){ window.focus(); window.print(); }, 200);
@@ -491,9 +490,6 @@ const PrintLayout = React.forwardRef<HTMLDivElement, { data: JobData }>(function
           </table>
         </div>
       ))}
-      <div style={{ marginTop: 24, textAlign: "center", fontSize: 9, color: "#9ca3af" }}>
-        この求人票はAIにより自動生成されました。内容は参考情報です。
-      </div>
     </div>
   );
 });
