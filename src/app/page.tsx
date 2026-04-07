@@ -1,6 +1,8 @@
 "use client";
 
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
+
+const STORAGE_KEY = "job-listing-app:state:v1";
 
 type JobData = {
   companyName: string;
@@ -24,6 +26,47 @@ export default function Home() {
   const [error, setError] = useState("");
   const [pdfGenerating, setPdfGenerating] = useState(false);
   const printRef = useRef<HTMLDivElement>(null);
+  const [hydrated, setHydrated] = useState(false);
+
+  // Restore persisted state on mount so PDF download / reload doesn't lose edits.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const s = JSON.parse(raw);
+        if (s.companyName) setCompanyName(s.companyName);
+        if (s.companyUrl) setCompanyUrl(s.companyUrl);
+        if (s.jobTitle) setJobTitle(s.jobTitle);
+        if (s.salary) setSalary(s.salary);
+        if (s.result) setResult(s.result);
+      }
+    } catch {}
+    setHydrated(true);
+  }, []);
+
+  // Auto-save on every change (after hydration to avoid wiping with empty defaults).
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ companyName, companyUrl, jobTitle, salary, result })
+      );
+    } catch {}
+  }, [hydrated, companyName, companyUrl, jobTitle, salary, result]);
+
+  const handleClearAll = () => {
+    if (!confirm("入力と編集中の求人票をすべてリセットしますか？")) return;
+    setCompanyName("");
+    setCompanyUrl("");
+    setJobTitle("");
+    setSalary("");
+    setResult(null);
+    setError("");
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {}
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -145,8 +188,8 @@ export default function Home() {
     } catch (err: any) {
       console.error(err);
       setError("PDF生成に失敗しました: " + (err?.message || String(err)));
-      if (node) node.style.display = "none";
     } finally {
+      if (node) node.style.display = "none";
       setPdfGenerating(false);
     }
   };
@@ -403,6 +446,12 @@ export default function Home() {
                 className="bg-blue-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-blue-700"
               >
                 🖨 印刷 / PDFとして保存
+              </button>
+              <button
+                onClick={handleClearAll}
+                className="bg-gray-200 text-gray-700 px-4 py-3 rounded-lg font-medium hover:bg-gray-300"
+              >
+                🗑 リセット
               </button>
             </div>
             <p className="text-xs text-gray-500">
