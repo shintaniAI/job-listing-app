@@ -106,14 +106,29 @@ export async function POST(req: NextRequest) {
       { status: 400 }
     );
   }
-  const companyName: string =
-    typeof body?.companyName === "string" ? body.companyName.trim().slice(0, 200) : "";
+  const pick = (k: string) =>
+    typeof body?.[k] === "string" ? body[k].trim().slice(0, 200) : "";
+  const companyName = pick("companyName");
+  const jobTitle = pick("jobTitle");
+  const workLocation = pick("workLocation");
+  const employmentType = pick("employmentType");
+  const salary = pick("salary");
+  const keywords = pick("keywords");
   if (!companyName) {
-    return NextResponse.json(
-      { error: "会社名を入力してください" },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "会社名を入力してください" }, { status: 400 });
   }
+  if (!jobTitle) {
+    return NextResponse.json({ error: "職種を入力してください" }, { status: 400 });
+  }
+  const filters: Array<[string, string]> = [
+    ["会社名", companyName],
+    ["職種", jobTitle],
+    ["勤務地", workLocation],
+    ["雇用形態", employmentType],
+    ["給与", salary],
+    ["キーワード", keywords],
+  ].filter(([, v]) => v) as Array<[string, string]>;
+  const filterBlock = filters.map(([k, v]) => `- ${k}: ${v}`).join("\n");
 
   try {
     const openai = getOpenAI();
@@ -123,7 +138,11 @@ export async function POST(req: NextRequest) {
     ).join("\n");
 
     const prompt = [
-      `あなたは日本の求人媒体を横断調査するリサーチアシスタントです。会社名「${companyName}」について、下記の日本の主要求人媒体それぞれで web_search ツールを使い、同社の求人を検索してください。検索結果から実際の求人詳細ページにアクセスし、ページに書かれている本文テキストを rawText にそのまま転記してください。`,
+      `あなたは日本の求人媒体を横断調査するリサーチアシスタントです。下記の絞り込み条件に合致する求人を、日本の主要求人媒体それぞれで web_search ツールを使って検索してください。検索結果から実際の求人詳細ページにアクセスし、ページに書かれている本文テキストを rawText にそのまま転記してください。`,
+      "",
+      "【絞り込み条件】",
+      filterBlock,
+      `※ 必須条件は「会社名」と「職種」です。会社名「${companyName}」の求人のうち、職種「${jobTitle}」に該当するもののみを対象としてください。他の条件（勤務地・雇用形態・給与・キーワード）は指定がある場合のみ絞り込みに使ってください。該当がない媒体は listings を空配列にし note に理由を書いてください。`,
       "",
       "【厳守ルール】",
       "- ページに書かれていない情報を創作しない（ハルシネーション絶対禁止）。",
@@ -178,6 +197,11 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       companyName,
+      jobTitle,
+      workLocation,
+      employmentType,
+      salary,
+      keywords,
       generatedAt: new Date().toISOString(),
       sources,
     });
