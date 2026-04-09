@@ -1,75 +1,85 @@
 "use client";
 
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 
-const STORAGE_KEY = "job-listing-app:state:v1";
+const STORAGE_KEY = "job-search-app:state:v2";
 
-type JobData = {
-  companyName: string;
-  jobTitle: string;
-  summary: string;
-  overview: Record<string, string>;
-  jobContent: Record<string, string>;
-  requirements: Record<string, string>;
-  environment: Record<string, string>;
-  extra: Record<string, string>;
-  sources?: string[];
+type Listing = {
+  title: string;
+  url: string;
+  rawText: string;
 };
 
-const SECTION_DEFS: { key: keyof JobData; title: string }[] = [
-  { key: "overview", title: "募集概要" },
-  { key: "jobContent", title: "仕事内容" },
-  { key: "requirements", title: "募集要項" },
-  { key: "environment", title: "仕事環境" },
-  { key: "extra", title: "その他" },
-];
+type Source = {
+  id: string;
+  media: string;
+  domain: string;
+  searchUrl: string;
+  listings: Listing[];
+  note?: string;
+};
+
+type SearchResult = {
+  companyName: string;
+  generatedAt: string;
+  sources: Source[];
+};
 
 export default function Home() {
   const [companyName, setCompanyName] = useState("");
-  const [companyUrl, setCompanyUrl] = useState("");
-  const [jobTitle, setJobTitle] = useState("");
-  const [salary, setSalary] = useState("");
-
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<JobData | null>(null);
+  const [result, setResult] = useState<SearchResult | null>(null);
   const [error, setError] = useState("");
-  const [pdfGenerating, setPdfGenerating] = useState(false);
-  const printRef = useRef<HTMLDivElement>(null);
   const [hydrated, setHydrated] = useState(false);
 
-  // Restore persisted state on mount so PDF download / reload doesn't lose edits.
   useEffect(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const s = JSON.parse(raw);
-        if (s.companyName) setCompanyName(s.companyName);
-        if (s.companyUrl) setCompanyUrl(s.companyUrl);
-        if (s.jobTitle) setJobTitle(s.jobTitle);
-        if (s.salary) setSalary(s.salary);
+        if (typeof s.companyName === "string") setCompanyName(s.companyName);
         if (s.result) setResult(s.result);
       }
     } catch {}
     setHydrated(true);
   }, []);
 
-  // Auto-save on every change (after hydration to avoid wiping with empty defaults).
   useEffect(() => {
     if (!hydrated) return;
     try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({ companyName, companyUrl, jobTitle, salary, result })
-      );
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ companyName, result }));
     } catch {}
-  }, [hydrated, companyName, companyUrl, jobTitle, salary, result]);
+  }, [hydrated, companyName, result]);
 
-  const handleClearAll = () => {
-    if (!confirm("入力と編集中の求人票をすべてリセットしますか？")) return;
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = companyName.trim();
+    if (!name) {
+      setError("会社名を入力してください");
+      return;
+    }
+    setLoading(true);
+    setError("");
+    setResult(null);
+    try {
+      const res = await fetch("/api/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ companyName: name }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "エラーが発生しました");
+      setResult(data as SearchResult);
+    } catch (err: any) {
+      setError(err.message || String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleClear = () => {
+    if (!confirm("入力と検索結果をリセットしますか？")) return;
     setCompanyName("");
-    setCompanyUrl("");
-    setJobTitle("");
-    setSalary("");
     setResult(null);
     setError("");
     try {
@@ -77,636 +87,232 @@ export default function Home() {
     } catch {}
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    setError("");
-    setResult(null);
-    try {
-      const res = await fetch("/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          companyName: companyName.trim(),
-          companyUrl: companyUrl.trim(),
-          jobTitle: jobTitle.trim(),
-          salary: salary.trim(),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "エラーが発生しました");
-      setResult({
-        companyName: data.companyName || "",
-        jobTitle: data.jobTitle || "",
-        summary: data.summary || "",
-        overview: data.overview || {},
-        jobContent: data.jobContent || {},
-        requirements: data.requirements || {},
-        environment: data.environment || {},
-        extra: data.extra || {},
-        sources: data.sources || [],
-      });
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleDownloadPdf = async () => {
-    if (!result) return;
-    const node = printRef.current;
-    if (!node) return;
-    setPdfGenerating(true);
-    setError("");
-    try {
-      // Client-side PDF generation (Mac Safari/Chrome compatible).
-      // Browser rasterizes text → no font embedding needed.
-      const [{ default: html2canvas }, jsPDFmod] = await Promise.all([
-        import("html2canvas"),
-        import("jspdf"),
-      ]);
-      const JsPDF = (jsPDFmod as any).jsPDF || (jsPDFmod as any).default;
-
-      // Make the hidden node visible to the layout engine temporarily.
-      node.style.display = "block";
-      // Force reflow for Safari
-      void node.offsetHeight;
-
-      const canvas = await html2canvas(node, {
-        scale: 2,
-        useCORS: true,
-        backgroundColor: "#ffffff",
-        windowWidth: node.scrollWidth,
-      });
-
-      node.style.display = "none";
-
-      const imgData = canvas.toDataURL("image/png");
-      const pdf = new JsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
-      const pageW = pdf.internal.pageSize.getWidth();
-      const pageH = pdf.internal.pageSize.getHeight();
-      const margin = 10;
-      const imgW = pageW - margin * 2;
-      const imgH = (canvas.height * imgW) / canvas.width;
-
-      if (imgH <= pageH - margin * 2) {
-        pdf.addImage(imgData, "PNG", margin, margin, imgW, imgH);
-      } else {
-        // Multi-page: slice the canvas vertically.
-        const pageContentH = pageH - margin * 2;
-        const pxPerMm = canvas.width / imgW;
-        const sliceHpx = Math.floor(pageContentH * pxPerMm);
-        let yPx = 0;
-        let first = true;
-        while (yPx < canvas.height) {
-          const h = Math.min(sliceHpx, canvas.height - yPx);
-          const slice = document.createElement("canvas");
-          slice.width = canvas.width;
-          slice.height = h;
-          const ctx = slice.getContext("2d")!;
-          ctx.fillStyle = "#ffffff";
-          ctx.fillRect(0, 0, slice.width, slice.height);
-          ctx.drawImage(canvas, 0, yPx, canvas.width, h, 0, 0, canvas.width, h);
-          const sliceData = slice.toDataURL("image/png");
-          if (!first) pdf.addPage();
-          pdf.addImage(sliceData, "PNG", margin, margin, imgW, (h / pxPerMm));
-          first = false;
-          yPx += h;
-        }
-      }
-
-      const fileName = `求人票_${result.companyName || "job"}.pdf`;
-      // Try multiple download strategies for Mac Chrome/Safari reliability.
-      try {
-        pdf.save(fileName);
-      } catch {
-        // Fallback 1: bloburl in new tab (Safari sometimes blocks anchor download)
-        const blob = pdf.output("blob") as Blob;
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = fileName;
-        a.rel = "noopener";
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => {
-          a.remove();
-          URL.revokeObjectURL(url);
-        }, 2000);
-      }
-    } catch (err: any) {
-      console.error(err);
-      setError("PDF生成に失敗しました: " + (err?.message || String(err)));
-    } finally {
-      if (node) node.style.display = "none";
-      setPdfGenerating(false);
-    }
-  };
-
-  // Guaranteed fallback: open a new window with formatted HTML and call window.print().
-  // Uses the browser's native "Save as PDF" — works on Mac Chrome & Safari unconditionally.
-  const handlePrintPdf = () => {
-    if (!result) return;
-    const title = [result.companyName, result.jobTitle].filter(Boolean).join(" - ") || "求人票";
-    const sections: { title: string; rows: Record<string, string> }[] = SECTION_DEFS
-      .map(({ key, title }) => ({ title, rows: ((result as any)[key] || {}) as Record<string, string> }))
-      .filter((s) => Object.keys(s.rows).length > 0);
-
-    const esc = (s: string) =>
-      s
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;");
-
-    const sectionsHtml = sections
-      .map(
-        (s) => `
-      <div class="section">
-        <h2>${esc(s.title)}</h2>
-        <table>
-          <tbody>
-            ${Object.entries(s.rows)
-              .map(
-                ([k, v]) =>
-                  `<tr><th>${esc(k)}</th><td>${esc(v || "—")}</td></tr>`
-              )
-              .join("")}
-          </tbody>
-        </table>
-      </div>`
-      )
-      .join("");
-
-    const html = `<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>${esc(
-      title
-    )}</title><style>
-      @page { size: A4; margin: 14mm; }
-      * { box-sizing: border-box; }
-      body { font-family: "Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic","Meiryo","Noto Sans JP",system-ui,sans-serif; color:#222; font-size:12px; line-height:1.65; margin:0; padding:24px; }
-      .header { background:#1e40af; color:#fff; padding:16px 20px; border-radius:6px; margin-bottom:20px; }
-      .header h1 { font-size:20px; margin:0 0 4px; }
-      .header p { font-size:12px; margin:0; opacity:0.92; }
-      .section { margin-bottom:18px; page-break-inside: avoid; }
-      .section h2 { font-size:13px; color:#1e40af; border-bottom:2px solid #1e40af; padding-bottom:4px; margin:0 0 8px; }
-      table { width:100%; border-collapse:collapse; }
-      th, td { padding:8px 10px; font-size:11px; vertical-align:top; border-bottom:1px solid #e5e7eb; }
-      th { width:26%; background:#f3f4f6; color:#4b5563; font-weight:700; text-align:left; }
-      td { white-space:pre-wrap; }
-      .footer { margin-top:24px; text-align:center; font-size:9px; color:#9ca3af; }
-      @media print { body { padding:0; } }
-    </style></head><body>
-      <div class="header">
-        <h1>${esc(title)}</h1>
-        ${result.summary ? `<p>${esc(result.summary)}</p>` : ""}
-      </div>
-      ${sectionsHtml}
-      <script>
-        window.addEventListener('load', function(){
-          setTimeout(function(){ window.focus(); window.print(); }, 200);
-        });
-      </script>
-    </body></html>`;
-
-    const w = window.open("", "_blank");
-    if (!w) {
-      setError("ポップアップがブロックされています。ブラウザのポップアップ許可を確認してください。");
-      return;
-    }
-    w.document.open();
-    w.document.write(html);
-    w.document.close();
-  };
-
-  const updateField = (key: keyof JobData, value: string) => {
-    if (!result) return;
-    setResult({ ...result, [key]: value } as JobData);
-  };
-
-  type SectionKey = "overview" | "jobContent" | "requirements" | "environment" | "extra";
-
-  const updateSectionValue = (section: SectionKey, key: string, value: string) => {
-    if (!result) return;
-    setResult({ ...result, [section]: { ...result[section], [key]: value } });
-  };
-
-  const renameSectionKey = (section: SectionKey, oldKey: string, newKey: string) => {
-    if (!result) return;
-    if (!newKey.trim() || oldKey === newKey) return;
-    const src = result[section] || {};
-    if (newKey in src) return; // avoid collision
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(src)) out[k === oldKey ? newKey : k] = v;
-    setResult({ ...result, [section]: out });
-  };
-
-  const deleteSectionRow = (section: SectionKey, key: string) => {
-    if (!result) return;
-    const src = { ...(result[section] || {}) };
-    delete src[key];
-    setResult({ ...result, [section]: src });
-  };
-
-  const addSectionRow = (section: SectionKey) => {
-    if (!result) return;
-    const src = { ...(result[section] || {}) };
-    let base = "新しい項目";
-    let name = base;
-    let i = 2;
-    while (name in src) name = `${base}${i++}`;
-    src[name] = "";
-    setResult({ ...result, [section]: src });
-  };
+  const totalListings = result
+    ? result.sources.reduce((n, s) => n + s.listings.length, 0)
+    : 0;
 
   return (
-    <main className="max-w-3xl mx-auto px-4 py-12">
-      <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成</h1>
-      <p className="text-center text-gray-500 mb-8">
-        会社情報を入力 → 外部ソースから収集 → 編集 → PDF出力
+    <main className="max-w-4xl mx-auto px-4 py-10">
+      <h1 className="text-3xl font-bold text-center mb-2">🔎 求人媒体 横断検索</h1>
+      <p className="text-center text-gray-500 mb-8 text-sm">
+        会社名を入力 →  Indeed / doda / マイナビ転職 / リクナビNEXT / エン転職 を横断検索 → 掲載内容を原文のまま表示
       </p>
 
-      <form onSubmit={handleSubmit} className="bg-white rounded-xl border shadow-sm p-6 mb-8 space-y-4">
+      <form
+        onSubmit={handleSubmit}
+        className="bg-white rounded-xl border shadow-sm p-6 mb-8 space-y-4"
+      >
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
-            会社名（任意）
+            会社名 <span className="text-red-500">*</span>
           </label>
           <input
             type="text"
             value={companyName}
             onChange={(e) => setCompanyName(e.target.value)}
-            placeholder="例: 〇〇クリニック"
+            placeholder="例: 株式会社サイバーエージェント"
             className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            disabled={loading}
           />
+          <p className="text-xs text-gray-400 mt-1">
+            正式名称（株式会社〇〇）で入れるとヒット率が上がります
+          </p>
         </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            会社HP URL（任意）
-          </label>
-          <input
-            type="url"
-            value={companyUrl}
-            onChange={(e) => setCompanyUrl(e.target.value)}
-            placeholder="https://example.com（未入力ならSerpAPIで会社名検索）"
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
+        <div className="flex gap-3">
+          <button
+            type="submit"
+            disabled={loading}
+            className="flex-1 bg-blue-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50"
+          >
+            {loading ? "検索中（最大60秒かかります）..." : "🔍 求人を検索"}
+          </button>
+          <button
+            type="button"
+            onClick={handleClear}
+            disabled={loading}
+            className="bg-gray-100 text-gray-700 px-4 py-3 rounded-lg font-medium hover:bg-gray-200 disabled:opacity-50"
+          >
+            リセット
+          </button>
         </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            職種（任意）
-          </label>
-          <input
-            type="text"
-            value={jobTitle}
-            onChange={(e) => setJobTitle(e.target.value)}
-            placeholder="例: 看護師 / フロントエンドエンジニア"
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            給与（任意）
-          </label>
-          <input
-            type="text"
-            value={salary}
-            onChange={(e) => setSalary(e.target.value)}
-            placeholder="例: 月給28万円〜35万円"
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-        </div>
-        <button
-          type="submit"
-          disabled={loading}
-          className="w-full bg-blue-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50"
-        >
-          {loading ? "生成中..." : "求人票を生成"}
-        </button>
       </form>
 
       {loading && (
         <div className="text-center py-12">
-          <div className="inline-block animate-spin rounded-full h-8 w-8 border-4 border-blue-600 border-t-transparent mb-4"></div>
-          <p className="text-gray-500">求人情報を収集・整理しています...</p>
+          <div className="inline-block animate-spin rounded-full h-10 w-10 border-4 border-blue-600 border-t-transparent mb-4"></div>
+          <p className="text-gray-500 text-sm">各求人媒体を横断検索しています…</p>
+          <p className="text-gray-400 text-xs mt-1">通常 10〜40 秒程度かかります</p>
         </div>
       )}
 
       {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-4 mb-6 whitespace-pre-wrap">
-          {error}
+        <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-4 mb-6 whitespace-pre-wrap text-sm">
+          ⚠️ {error}
         </div>
       )}
 
       {result && (
         <div className="space-y-6">
-          <div className="bg-white rounded-xl shadow-sm border p-6 space-y-4">
-            <p className="text-xs text-gray-500">✏️ 各項目は直接編集できます。編集後の内容でPDFが生成されます。</p>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <LabeledInput
-                label="会社名"
-                value={result.companyName}
-                onChange={(v) => updateField("companyName", v)}
-              />
-              <LabeledInput
-                label="職種"
-                value={result.jobTitle}
-                onChange={(v) => updateField("jobTitle", v)}
-              />
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <div className="text-sm text-gray-500">検索対象</div>
+              <div className="text-lg font-bold text-gray-900">{result.companyName}</div>
             </div>
-            <LabeledTextarea
-              label="募集概要（summary）"
-              value={result.summary}
-              onChange={(v) => updateField("summary", v)}
-              rows={2}
-            />
-
-            {SECTION_DEFS.map(({ key, title }) => (
-              <EditableSection
-                key={key}
-                title={title}
-                rows={(result[key] as Record<string, string>) || {}}
-                onChangeValue={(k, v) => updateSectionValue(key as SectionKey, k, v)}
-                onRenameKey={(oldK, newK) => renameSectionKey(key as SectionKey, oldK, newK)}
-                onDeleteRow={(k) => deleteSectionRow(key as SectionKey, k)}
-                onAddRow={() => addSectionRow(key as SectionKey)}
-              />
-            ))}
+            <div className="text-right">
+              <div className="text-sm text-gray-500">合計ヒット</div>
+              <div className="text-lg font-bold text-blue-700">{totalListings} 件</div>
+            </div>
           </div>
 
-          {result.sources && result.sources.length > 0 && (
-            <div className="bg-gray-50 rounded-lg border p-4">
-              <h3 className="font-bold text-gray-700 text-sm mb-2">📎 情報ソース（PDFには含まれません）</h3>
-              <ul className="text-sm text-gray-500 space-y-1">
-                {result.sources.map((src, i) => (
-                  <li key={i}>
-                    {src.startsWith("http") ? (
-                      <a href={src} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline break-all">
-                        {src}
-                      </a>
-                    ) : (
-                      <span>{src}</span>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          <div className="text-center space-y-3">
-            <div className="flex flex-wrap gap-3 justify-center">
-              <button
-                onClick={handleDownloadPdf}
-                disabled={pdfGenerating}
-                className="bg-green-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-green-700 disabled:opacity-50"
-              >
-                {pdfGenerating ? "PDF生成中..." : "📥 PDFダウンロード"}
-              </button>
-              <button
-                onClick={handlePrintPdf}
-                className="bg-blue-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-blue-700"
-              >
-                🖨 印刷 / PDFとして保存
-              </button>
-              <button
-                onClick={handleClearAll}
-                className="bg-gray-200 text-gray-700 px-4 py-3 rounded-lg font-medium hover:bg-gray-300"
-              >
-                🗑 リセット
-              </button>
-            </div>
-            <p className="text-xs text-gray-500">
-              ダウンロードが動かない場合は「印刷 / PDFとして保存」をお使いください（Mac標準の「PDFとして保存」が使えます）
-            </p>
-          </div>
-
-          {/* Hidden print layout used by html2canvas */}
-          <PrintLayout ref={printRef} data={result} />
+          {result.sources.map((source) => (
+            <SourceCard key={source.id} source={source} />
+          ))}
+          <p className="text-xs text-gray-400 text-center">
+            最終更新: {new Date(result.generatedAt).toLocaleString("ja-JP")}
+          </p>
         </div>
       )}
+
+      <footer className="text-center text-xs text-gray-400 mt-16">
+        掲載内容は各求人媒体に書かれている情報を取得時点のまま表示しています。最新情報は各媒体の元ページでご確認ください。
+      </footer>
     </main>
   );
 }
 
-const PrintLayout = React.forwardRef<HTMLDivElement, { data: JobData }>(function PrintLayout({ data }, ref) {
-  const title = [data.companyName, data.jobTitle].filter(Boolean).join(" - ") || "求人票";
-  const sections: { title: string; rows: Record<string, string> }[] = SECTION_DEFS
-    .map(({ key, title }) => ({ title, rows: ((data as any)[key] || {}) as Record<string, string> }))
-    .filter((s) => Object.keys(s.rows).length > 0);
-
+function SourceCard({ source }: { source: Source }) {
+  const hasListings = source.listings.length > 0;
   return (
-    <div
-      ref={ref}
-      style={{
-        display: "none",
-        position: "absolute",
-        left: "-10000px",
-        top: 0,
-        width: "794px", // ~A4 @ 96dpi
-        padding: "32px",
-        background: "#ffffff",
-        color: "#222",
-        fontFamily:
-          '"Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", "Noto Sans JP", system-ui, sans-serif',
-        fontSize: "12px",
-        lineHeight: 1.6,
-        boxSizing: "border-box",
-      }}
-    >
-      <div style={{ background: "#1e40af", color: "#fff", padding: "16px 20px", borderRadius: 6, marginBottom: 20 }}>
-        <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>{title}</div>
-        {data.summary ? <div style={{ fontSize: 12, opacity: 0.92 }}>{data.summary}</div> : null}
-      </div>
-      {sections.map((s) => (
-        <div key={s.title} style={{ marginBottom: 16 }}>
-          <div
-            style={{
-              fontSize: 13,
-              fontWeight: 700,
-              color: "#1e40af",
-              borderBottom: "2px solid #1e40af",
-              paddingBottom: 4,
-              marginBottom: 8,
-            }}
+    <section className="bg-white rounded-xl border shadow-sm overflow-hidden">
+      <header className="px-5 py-3 bg-gradient-to-r from-blue-600 to-blue-500 text-white flex items-center justify-between flex-wrap gap-2">
+        <div className="flex items-center gap-3">
+          <span className="text-lg font-bold">📘 {source.media}</span>
+          <span className="text-xs opacity-80">{source.domain}</span>
+        </div>
+        <div className="flex items-center gap-2 text-xs">
+          <span
+            className={
+              hasListings
+                ? "bg-white/20 px-2 py-0.5 rounded-full"
+                : "bg-white/10 px-2 py-0.5 rounded-full opacity-80"
+            }
           >
-            {s.title}
-          </div>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <tbody>
-              {Object.entries(s.rows).map(([k, v]) => (
-                <tr key={k} style={{ borderBottom: "1px solid #e5e7eb" }}>
-                  <td
-                    style={{
-                      width: "26%",
-                      background: "#f3f4f6",
-                      padding: "8px 10px",
-                      fontWeight: 700,
-                      fontSize: 11,
-                      color: "#4b5563",
-                      verticalAlign: "top",
-                    }}
-                  >
-                    {k}
-                  </td>
-                  <td style={{ padding: "8px 10px", fontSize: 11, verticalAlign: "top", whiteSpace: "pre-wrap" }}>
-                    {v || "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+            {hasListings ? `${source.listings.length} 件ヒット` : "掲載なし"}
+          </span>
+          {source.searchUrl && (
+            <a
+              href={source.searchUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="bg-white/20 hover:bg-white/30 px-2 py-0.5 rounded-full"
+            >
+              検索ページ ↗
+            </a>
+          )}
         </div>
-      ))}
-    </div>
-  );
-});
-
-function LabeledInput({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <div>
-      <label className="block text-xs font-medium text-gray-600 mb-1">{label}</label>
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-      />
-    </div>
-  );
-}
-
-function LabeledTextarea({
-  label,
-  value,
-  onChange,
-  rows = 3,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  rows?: number;
-}) {
-  return (
-    <div>
-      <label className="block text-xs font-medium text-gray-600 mb-1">{label}</label>
-      <textarea
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        rows={rows}
-        className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-      />
-    </div>
-  );
-}
-
-function EditableSection({
-  title,
-  rows,
-  onChangeValue,
-  onRenameKey,
-  onDeleteRow,
-  onAddRow,
-}: {
-  title: string;
-  rows: Record<string, string>;
-  onChangeValue: (key: string, value: string) => void;
-  onRenameKey: (oldKey: string, newKey: string) => void;
-  onDeleteRow: (key: string) => void;
-  onAddRow: () => void;
-}) {
-  const entries = Object.entries(rows || {});
-  return (
-    <div>
-      <div className="flex items-center justify-between border-b-2 border-blue-600 pb-1 mb-2">
-        <h3 className="font-bold text-gray-800">{title}</h3>
-        <button
-          type="button"
-          onClick={onAddRow}
-          className="text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded px-2 py-1"
-        >
-          ＋項目を追加
-        </button>
+      </header>
+      <div className="p-5 space-y-5">
+        {!hasListings && (
+          <p className="text-sm text-gray-500 italic">
+            {source.note
+              ? source.note
+              : "当該企業の求人は見つかりませんでした（掲載なし／検索不可）。"}
+          </p>
+        )}
+        {source.listings.map((l, i) => (
+          <ListingBlock key={i} listing={l} sourceName={source.media} index={i + 1} />
+        ))}
       </div>
-      {entries.length === 0 ? (
-        <p className="text-xs text-gray-400 italic mb-2">項目がありません。「＋項目を追加」から追加できます。</p>
-      ) : (
-        <div className="space-y-2">
-          {entries.map(([key, val], idx) => (
-            <KeyValueRow
-              key={`${idx}-${key}`}
-              rowKey={key}
-              value={val}
-              onChangeValue={(v) => onChangeValue(key, v)}
-              onRenameKey={(newK) => onRenameKey(key, newK)}
-              onDelete={() => onDeleteRow(key)}
-            />
-          ))}
-        </div>
-      )}
-    </div>
+    </section>
   );
 }
 
-function KeyValueRow({
-  rowKey,
-  value,
-  onChangeValue,
-  onRenameKey,
-  onDelete,
+function ListingBlock({
+  listing,
+  sourceName,
+  index,
 }: {
-  rowKey: string;
-  value: string;
-  onChangeValue: (v: string) => void;
-  onRenameKey: (newKey: string) => void;
-  onDelete: () => void;
+  listing: Listing;
+  sourceName: string;
+  index: number;
 }) {
-  const [localKey, setLocalKey] = React.useState(rowKey);
-  React.useEffect(() => setLocalKey(rowKey), [rowKey]);
-  const commitKey = () => {
-    const trimmed = localKey.trim();
-    if (!trimmed) {
-      setLocalKey(rowKey);
-      return;
-    }
-    if (trimmed !== rowKey) onRenameKey(trimmed);
+  const [copied, setCopied] = useState(false);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+
+  const buildCopyText = () => {
+    const parts: string[] = [];
+    parts.push(`【媒体】${sourceName}`);
+    if (listing.title) parts.push(`【タイトル】${listing.title}`);
+    if (listing.url) parts.push(`【URL】${listing.url}`);
+    parts.push("");
+    parts.push(listing.rawText || "（本文なし）");
+    return parts.join("\n");
   };
+
+  const handleCopy = async () => {
+    const text = buildCopyText();
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Fallback: select textarea
+      const ta = taRef.current;
+      if (ta) {
+        ta.focus();
+        ta.select();
+        try {
+          document.execCommand("copy");
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch {}
+      }
+    }
+  };
+
   return (
-    <div className="flex flex-col md:flex-row gap-2 items-start">
-      <input
-        type="text"
-        value={localKey}
-        onChange={(e) => setLocalKey(e.target.value)}
-        onBlur={commitKey}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            (e.target as HTMLInputElement).blur();
-          }
-        }}
-        className="md:w-1/4 border border-gray-200 bg-gray-50 rounded px-2 py-1.5 text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-      />
-      <textarea
-        value={value}
-        onChange={(e) => onChangeValue(e.target.value)}
-        rows={Math.max(2, Math.min(6, (value || "").split("\n").length + 1))}
-        className="flex-1 border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-      />
-      <button
-        type="button"
-        onClick={onDelete}
-        title="この項目を削除"
-        className="text-red-500 hover:bg-red-50 border border-red-200 rounded px-2 py-1.5 text-sm"
-      >
-        🗑
-      </button>
+    <div className="border border-gray-200 rounded-lg overflow-hidden">
+      <div className="bg-gray-50 px-4 py-3 border-b border-gray-200">
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <div className="min-w-0 flex-1">
+            <div className="text-xs text-gray-400 mb-0.5">求人 #{index}</div>
+            <div className="font-bold text-gray-800 break-words">
+              {listing.title || "（タイトルなし）"}
+            </div>
+            {listing.url && (
+              <a
+                href={listing.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-blue-600 hover:underline break-all"
+              >
+                {listing.url} ↗
+              </a>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={handleCopy}
+            className={
+              "text-xs rounded-md px-3 py-1.5 border font-medium whitespace-nowrap " +
+              (copied
+                ? "bg-green-600 text-white border-green-600"
+                : "bg-white text-gray-700 border-gray-300 hover:bg-gray-100")
+            }
+          >
+            {copied ? "✓ コピーしました" : "📋 コピー"}
+          </button>
+        </div>
+      </div>
+      <div className="p-0">
+        <textarea
+          ref={taRef}
+          readOnly
+          value={buildCopyText()}
+          className="w-full border-0 bg-white p-4 text-sm text-gray-800 font-mono leading-relaxed whitespace-pre-wrap resize-y focus:outline-none focus:ring-2 focus:ring-blue-400"
+          rows={Math.min(30, Math.max(8, (listing.rawText || "").split("\n").length + 3))}
+        />
+      </div>
     </div>
   );
 }
