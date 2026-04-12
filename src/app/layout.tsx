@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "求人票自動生成アプリ",
-  description: "会社名やURLから求人票PDFを自動生成",
+  title: "求人媒体 横断検索",
+  description: "会社名を入力するだけで、Indeed / doda / マイナビ転職 / リクナビNEXT / エン転職 の掲載求人を横断検索し、原文のまま表示します。",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

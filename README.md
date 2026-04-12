@@ -1,25 +1,32 @@
-# 求人票自動生成アプリ (Job Listing Generator)
+# 求人媒体 横断検索アプリ (Job Board Aggregator)
 
-会社名またはURLを入力すると、AIが求人情報を収集・整理し、きれいなPDFを自動生成するWebアプリです。
+会社名を入力するだけで、日本の主要求人媒体（Indeed / doda / マイナビ転職 / リクナビNEXT / エン転職）を横断検索し、掲載があれば**掲載内容を原文のまま**媒体ごとに表示します。
 
 ## 機能
 
-- 🔍 会社名から求人情報をAI検索・収集
-- 🌐 求人ページURLから直接スクレイピング
-- 🤖 OpenAI GPT-4o-miniで情報を整理・補完
-- 📄 テーブル形式のPDF求人票を自動生成
+- 🔎 会社名1つで横断検索
+- 📋 各媒体 最大2件の求人を原文のまま表示（コピペ用 `<textarea>`）
+- 🧠 裏側は **OpenAI Responses API の `web_search` ツール**で取得（スクレイピング直叩きなし）
+- 💾 最後の検索結果は localStorage に保存
+
+## 対象媒体
+
+| # | 媒体 | ドメイン |
+|---|---|---|
+| 1 | Indeed | jp.indeed.com |
+| 2 | doda | doda.jp |
+| 3 | マイナビ転職 | tenshoku.mynavi.jp |
+| 4 | リクナビNEXT | next.rikunabi.com |
+| 5 | エン転職 | employment.en-japan.com |
+
+掲載が無い／到達できなかった媒体は「掲載なし」と表示されます。
 
 ## セットアップ
 
 ```bash
-# インストール
 npm install
-
-# 環境変数を設定
 cp .env.example .env.local
-# .env.local を編集してAPIキーを設定
-
-# 開発サーバー起動
+# OPENAI_API_KEY を設定
 npm run dev
 ```
 
@@ -27,42 +34,45 @@ npm run dev
 
 | 変数 | 必須 | 説明 |
 |------|------|------|
-| `OPENAI_API_KEY` | ✅ | OpenAI APIキー |
-| `SERPAPI_KEY` | ❌ | SerpAPI キー（Web検索精度向上） |
-
-## 使い方
-
-1. http://localhost:3000 を開く
-2. 会社名（例: `〇〇クリニック`）またはURLを入力
-3. 「生成」ボタンをクリック
-4. AIが求人情報を収集・整理（10-30秒）
-5. プレビューを確認
-6. 「PDFダウンロード」でPDFを保存
+| `OPENAI_API_KEY` | ✅ | OpenAI API キー（`web_search` ツール利用可能なアカウント） |
 
 ## 技術スタック
 
-- **Next.js 15** (App Router)
-- **TypeScript**
-- **Tailwind CSS**
-- **OpenAI API** (GPT-4o-mini)
-- **@react-pdf/renderer** (PDF生成)
-- **cheerio** (HTMLスクレイピング)
-- **SerpAPI** (Web検索、オプション)
+- Next.js 16 (App Router, `nodejs` runtime)
+- TypeScript + Tailwind CSS v4
+- openai SDK v6 (`responses.create` + `web_search` tool)
 
-## デプロイ
+## API
 
-```bash
-# Vercelにデプロイ
-npx vercel
+### `POST /api/search`
+
+```json
+{ "companyName": "株式会社サイバーエージェント" }
 ```
 
-Vercelダッシュボードで環境変数 `OPENAI_API_KEY` を設定してください。
+レスポンス:
 
-## 求人票フォーマット
+```json
+{
+  "companyName": "株式会社サイバーエージェント",
+  "generatedAt": "2026-04-09T04:00:00.000Z",
+  "sources": [
+    {
+      "id": "indeed",
+      "media": "Indeed",
+      "domain": "jp.indeed.com",
+      "searchUrl": "https://jp.indeed.com/...",
+      "listings": [
+        { "title": "...", "url": "https://...", "rawText": "..." }
+      ],
+      "note": ""
+    }
+  ]
+}
+```
 
-| セクション | 項目 |
-|-----------|------|
-| 募集概要 | 職種、給与、勤務地 |
-| 仕事内容 | 業務内容、クリニック紹介 |
-| 募集要項 | 雇用形態、勤務時間、応募資格 |
-| 仕事環境 | 給与・待遇、休日・休暇、福利厚生 |
+## 注意事項
+
+- `rawText` は OpenAI の web_search が取得したページ内容をそのまま転記する設計ですが、LLM 経由のため完全な原文保証ではありません。最終確認は各媒体の元ページで行ってください。
+- 各媒体の robots.txt / 利用規約を尊重してください。本アプリは検索結果の公開スニペット／公開求人ページの情報のみを扱います。
+- Vercel Hobby の関数タイムアウト 60s に合わせて設定しています。
