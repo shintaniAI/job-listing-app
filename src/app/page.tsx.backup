@@ -2,33 +2,26 @@
 
 import React, { useState, useRef, useEffect } from "react";
 
-const STORAGE_KEY = "job-listing-app:state:v2";
+const STORAGE_KEY = "job-listing-app:state:v1";
 
 type JobData = {
   companyName: string;
   jobTitle: string;
   summary: string;
-  basicInfo: Record<string, string>;
-  companyInfo: Record<string, string>;
+  overview: Record<string, string>;
   jobContent: Record<string, string>;
   requirements: Record<string, string>;
-  salary: Record<string, string>;
-  workConditions: Record<string, string>;
-  holidays: Record<string, string>;
-  benefits: Record<string, string>;
+  environment: Record<string, string>;
+  extra: Record<string, string>;
   sources?: string[];
 };
 
-// 新しい8セクション定義
 const SECTION_DEFS: { key: keyof JobData; title: string }[] = [
-  { key: "basicInfo", title: "1. 基本情報" },
-  { key: "companyInfo", title: "2. 企業情報" },
-  { key: "jobContent", title: "3. 仕事内容" },
-  { key: "requirements", title: "4. 応募資格" },
-  { key: "salary", title: "5. 給与・報酬" },
-  { key: "workConditions", title: "6. 勤務条件" },
-  { key: "holidays", title: "7. 休日・休暇" },
-  { key: "benefits", title: "8. 福利厚生・待遇" },
+  { key: "overview", title: "募集概要" },
+  { key: "jobContent", title: "仕事内容" },
+  { key: "requirements", title: "募集要項" },
+  { key: "environment", title: "仕事環境" },
+  { key: "extra", title: "その他" },
 ];
 
 export default function Home() {
@@ -44,7 +37,7 @@ export default function Home() {
   const printRef = useRef<HTMLDivElement>(null);
   const [hydrated, setHydrated] = useState(false);
 
-  // 状態の復元
+  // Restore persisted state on mount so PDF download / reload doesn't lose edits.
   useEffect(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -60,7 +53,7 @@ export default function Home() {
     setHydrated(true);
   }, []);
 
-  // 自動保存
+  // Auto-save on every change (after hydration to avoid wiping with empty defaults).
   useEffect(() => {
     if (!hydrated) return;
     try {
@@ -86,16 +79,9 @@ export default function Home() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    if (!companyName.trim() && !companyUrl.trim()) {
-      setError("会社名または会社URLのいずれかを入力してください。");
-      return;
-    }
-
     setLoading(true);
     setError("");
     setResult(null);
-
     try {
       const res = await fetch("/api/generate", {
         method: "POST",
@@ -107,26 +93,19 @@ export default function Home() {
           salary: salary.trim(),
         }),
       });
-
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "エラーが発生しました");
-
-      // 新しい8セクション構造に対応
       setResult({
         companyName: data.companyName || "",
         jobTitle: data.jobTitle || "",
         summary: data.summary || "",
-        basicInfo: data.basicInfo || {},
-        companyInfo: data.companyInfo || {},
+        overview: data.overview || {},
         jobContent: data.jobContent || {},
         requirements: data.requirements || {},
-        salary: data.salary || {},
-        workConditions: data.workConditions || {},
-        holidays: data.holidays || {},
-        benefits: data.benefits || {},
+        environment: data.environment || {},
+        extra: data.extra || {},
         sources: data.sources || [],
       });
-
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -140,15 +119,18 @@ export default function Home() {
     if (!node) return;
     setPdfGenerating(true);
     setError("");
-
     try {
+      // Client-side PDF generation (Mac Safari/Chrome compatible).
+      // Browser rasterizes text → no font embedding needed.
       const [{ default: html2canvas }, jsPDFmod] = await Promise.all([
         import("html2canvas"),
         import("jspdf"),
       ]);
       const JsPDF = (jsPDFmod as any).jsPDF || (jsPDFmod as any).default;
 
+      // Make the hidden node visible to the layout engine temporarily.
       node.style.display = "block";
+      // Force reflow for Safari
       void node.offsetHeight;
 
       const canvas = await html2canvas(node, {
@@ -171,6 +153,7 @@ export default function Home() {
       if (imgH <= pageH - margin * 2) {
         pdf.addImage(imgData, "PNG", margin, margin, imgW, imgH);
       } else {
+        // Multi-page: slice the canvas vertically.
         const pageContentH = pageH - margin * 2;
         const pxPerMm = canvas.width / imgW;
         const sliceHpx = Math.floor(pageContentH * pxPerMm);
@@ -193,10 +176,12 @@ export default function Home() {
         }
       }
 
-      const fileName = `求人票_${result.companyName || "job"}_${new Date().toISOString().slice(0, 10)}.pdf`;
+      const fileName = `求人票_${result.companyName || "job"}.pdf`;
+      // Try multiple download strategies for Mac Chrome/Safari reliability.
       try {
         pdf.save(fileName);
       } catch {
+        // Fallback 1: bloburl in new tab (Safari sometimes blocks anchor download)
         const blob = pdf.output("blob") as Blob;
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
@@ -219,6 +204,8 @@ export default function Home() {
     }
   };
 
+  // Guaranteed fallback: open a new window with formatted HTML and call window.print().
+  // Uses the browser's native "Save as PDF" — works on Mac Chrome & Safari unconditionally.
   const handlePrintPdf = () => {
     if (!result) return;
     const title = [result.companyName, result.jobTitle].filter(Boolean).join(" - ") || "求人票";
@@ -275,9 +262,6 @@ export default function Home() {
         ${result.summary ? `<p>${esc(result.summary)}</p>` : ""}
       </div>
       ${sectionsHtml}
-      <div class="footer">
-        <p>生成日: ${new Date().toLocaleDateString('ja-JP')} | 求人票自動生成システム v2.0</p>
-      </div>
       <script>
         window.addEventListener('load', function(){
           setTimeout(function(){ window.focus(); window.print(); }, 200);
@@ -300,7 +284,7 @@ export default function Home() {
     setResult({ ...result, [key]: value } as JobData);
   };
 
-  type SectionKey = "basicInfo" | "companyInfo" | "jobContent" | "requirements" | "salary" | "workConditions" | "holidays" | "benefits";
+  type SectionKey = "overview" | "jobContent" | "requirements" | "environment" | "extra";
 
   const updateSectionValue = (section: SectionKey, key: string, value: string) => {
     if (!result) return;
@@ -311,7 +295,7 @@ export default function Home() {
     if (!result) return;
     if (!newKey.trim() || oldKey === newKey) return;
     const src = result[section] || {};
-    if (newKey in src) return; // 競合回避
+    if (newKey in src) return; // avoid collision
     const out: Record<string, string> = {};
     for (const [k, v] of Object.entries(src)) out[k === oldKey ? newKey : k] = v;
     setResult({ ...result, [section]: out });
@@ -336,33 +320,25 @@ export default function Home() {
   };
 
   return (
-    <main className="max-w-4xl mx-auto px-4 py-12">
-      <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成アプリ v2.0</h1>
-      <p className="text-center text-gray-500 mb-2">
-        企業の公式採用ページから詳細情報を収集 → 8セクション構成の求人票を生成
-      </p>
-      <p className="text-center text-sm text-blue-600 mb-8">
-        🎯 Talentio、Wantedly、HRMOS等の公式採用ページを最優先で検索・分析
+    <main className="max-w-3xl mx-auto px-4 py-12">
+      <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成</h1>
+      <p className="text-center text-gray-500 mb-8">
+        会社情報を入力 → 外部ソースから収集 → 編集 → PDF出力
       </p>
 
       <form onSubmit={handleSubmit} className="bg-white rounded-xl border shadow-sm p-6 mb-8 space-y-4">
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
-            会社名 <span className="text-red-500">*</span>
+            会社名（任意）
           </label>
           <input
             type="text"
             value={companyName}
             onChange={(e) => setCompanyName(e.target.value)}
-            placeholder="例: 株式会社オリゾ"
+            placeholder="例: 〇〇クリニック"
             className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            required
           />
-          <p className="text-xs text-gray-500 mt-1">
-            「{companyName || "会社名"} 採用」「{companyName || "会社名"} 求人 公式」で検索します
-          </p>
         </div>
-
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
             会社HP URL（任意）
@@ -371,94 +347,80 @@ export default function Home() {
             type="url"
             value={companyUrl}
             onChange={(e) => setCompanyUrl(e.target.value)}
-            placeholder="https://example.com（指定した場合は直接このページを優先分析）"
+            placeholder="https://example.com（未入力ならSerpAPIで会社名検索）"
             className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              職種（任意）
-            </label>
-            <input
-              type="text"
-              value={jobTitle}
-              onChange={(e) => setJobTitle(e.target.value)}
-              placeholder="例: ソリューション営業"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              希望給与（任意）
-            </label>
-            <input
-              type="text"
-              value={salary}
-              onChange={(e) => setSalary(e.target.value)}
-              placeholder="例: 年収400万〜840万円"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            職種（任意）
+          </label>
+          <input
+            type="text"
+            value={jobTitle}
+            onChange={(e) => setJobTitle(e.target.value)}
+            placeholder="例: 看護師 / フロントエンドエンジニア"
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
         </div>
-
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            給与（任意）
+          </label>
+          <input
+            type="text"
+            value={salary}
+            onChange={(e) => setSalary(e.target.value)}
+            placeholder="例: 月給28万円〜35万円"
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
         <button
           type="submit"
           disabled={loading}
           className="w-full bg-blue-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50"
         >
-          {loading ? "🔍 企業採用ページを分析中..." : "🚀 詳細求人票を生成"}
+          {loading ? "生成中..." : "求人票を生成"}
         </button>
       </form>
 
       {loading && (
         <div className="text-center py-12">
           <div className="inline-block animate-spin rounded-full h-8 w-8 border-4 border-blue-600 border-t-transparent mb-4"></div>
-          <div className="space-y-2">
-            <p className="text-gray-700 font-medium">企業の公式採用ページを検索・分析しています...</p>
-            <p className="text-sm text-gray-500">Talentio、Wantedly、HRMOS、企業サイトを優先的に調査中</p>
-            <p className="text-xs text-gray-400">通常15-30秒で完了します</p>
-          </div>
+          <p className="text-gray-500">求人情報を収集・整理しています...</p>
         </div>
       )}
 
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-4 mb-6 whitespace-pre-wrap">
-          ❌ {error}
+          {error}
         </div>
       )}
 
       {result && (
         <div className="space-y-6">
-          <div className="bg-white rounded-xl shadow-sm border p-6 space-y-6">
-            <div className="border-b pb-4">
-              <p className="text-sm text-blue-600 mb-3">
-                ✏️ 各項目は直接編集できます。編集後の内容でPDFが生成されます。
-              </p>
+          <div className="bg-white rounded-xl shadow-sm border p-6 space-y-4">
+            <p className="text-xs text-gray-500">✏️ 各項目は直接編集できます。編集後の内容でPDFが生成されます。</p>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
-                <LabeledInput
-                  label="会社名"
-                  value={result.companyName}
-                  onChange={(v) => updateField("companyName", v)}
-                />
-                <LabeledInput
-                  label="職種"
-                  value={result.jobTitle}
-                  onChange={(v) => updateField("jobTitle", v)}
-                />
-              </div>
-              
-              <LabeledTextarea
-                label="募集概要"
-                value={result.summary}
-                onChange={(v) => updateField("summary", v)}
-                rows={3}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <LabeledInput
+                label="会社名"
+                value={result.companyName}
+                onChange={(v) => updateField("companyName", v)}
+              />
+              <LabeledInput
+                label="職種"
+                value={result.jobTitle}
+                onChange={(v) => updateField("jobTitle", v)}
               />
             </div>
+            <LabeledTextarea
+              label="募集概要（summary）"
+              value={result.summary}
+              onChange={(v) => updateField("summary", v)}
+              rows={2}
+            />
 
-            {/* 8セクションの編集エリア */}
             {SECTION_DEFS.map(({ key, title }) => (
               <EditableSection
                 key={key}
@@ -472,14 +434,12 @@ export default function Home() {
             ))}
           </div>
 
-          {/* 情報ソース表示 */}
           {result.sources && result.sources.length > 0 && (
             <div className="bg-gray-50 rounded-lg border p-4">
-              <h3 className="font-bold text-gray-700 text-sm mb-2">📎 情報取得ソース</h3>
-              <ul className="text-sm text-gray-600 space-y-1">
+              <h3 className="font-bold text-gray-700 text-sm mb-2">📎 情報ソース（PDFには含まれません）</h3>
+              <ul className="text-sm text-gray-500 space-y-1">
                 {result.sources.map((src, i) => (
-                  <li key={i} className="flex items-start">
-                    <span className="text-blue-500 mr-2">•</span>
+                  <li key={i}>
                     {src.startsWith("http") ? (
                       <a href={src} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline break-all">
                         {src}
@@ -493,19 +453,18 @@ export default function Home() {
             </div>
           )}
 
-          {/* PDF生成ボタン */}
-          <div className="text-center space-y-4">
+          <div className="text-center space-y-3">
             <div className="flex flex-wrap gap-3 justify-center">
               <button
                 onClick={handleDownloadPdf}
                 disabled={pdfGenerating}
-                className="bg-green-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-green-700 disabled:opacity-50 shadow-sm"
+                className="bg-green-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-green-700 disabled:opacity-50"
               >
-                {pdfGenerating ? "📄 PDF生成中..." : "📥 PDFダウンロード"}
+                {pdfGenerating ? "PDF生成中..." : "📥 PDFダウンロード"}
               </button>
               <button
                 onClick={handlePrintPdf}
-                className="bg-blue-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-blue-700 shadow-sm"
+                className="bg-blue-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-blue-700"
               >
                 🖨 印刷 / PDFとして保存
               </button>
@@ -517,11 +476,11 @@ export default function Home() {
               </button>
             </div>
             <p className="text-xs text-gray-500">
-              ダウンロードが動かない場合は「印刷 / PDFとして保存」をお使いください
+              ダウンロードが動かない場合は「印刷 / PDFとして保存」をお使いください（Mac標準の「PDFとして保存」が使えます）
             </p>
           </div>
 
-          {/* 印刷用隠しレイアウト */}
+          {/* Hidden print layout used by html2canvas */}
           <PrintLayout ref={printRef} data={result} />
         </div>
       )}
@@ -529,7 +488,6 @@ export default function Home() {
   );
 }
 
-// 印刷レイアウトコンポーネント
 const PrintLayout = React.forwardRef<HTMLDivElement, { data: JobData }>(function PrintLayout({ data }, ref) {
   const title = [data.companyName, data.jobTitle].filter(Boolean).join(" - ") || "求人票";
   const sections: { title: string; rows: Record<string, string> }[] = SECTION_DEFS
@@ -544,36 +502,31 @@ const PrintLayout = React.forwardRef<HTMLDivElement, { data: JobData }>(function
         position: "absolute",
         left: "-10000px",
         top: 0,
-        width: "794px",
+        width: "794px", // ~A4 @ 96dpi
         padding: "32px",
         background: "#ffffff",
         color: "#222",
-        fontFamily: '"Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", "Noto Sans JP", system-ui, sans-serif',
-        fontSize: "11px",
-        lineHeight: 1.5,
+        fontFamily:
+          '"Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", "Noto Sans JP", system-ui, sans-serif',
+        fontSize: "12px",
+        lineHeight: 1.6,
         boxSizing: "border-box",
       }}
     >
-      {/* ヘッダー */}
-      <div style={{ background: "#1e40af", color: "#fff", padding: "20px 24px", borderRadius: 6, marginBottom: 24 }}>
-        <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 6 }}>{title}</div>
-        {data.summary ? <div style={{ fontSize: 13, opacity: 0.92, lineHeight: 1.4 }}>{data.summary}</div> : null}
-        <div style={{ fontSize: 9, opacity: 0.7, marginTop: 8 }}>
-          生成日: {new Date().toLocaleDateString('ja-JP')} | 求人票自動生成システム v2.0
-        </div>
+      <div style={{ background: "#1e40af", color: "#fff", padding: "16px 20px", borderRadius: 6, marginBottom: 20 }}>
+        <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>{title}</div>
+        {data.summary ? <div style={{ fontSize: 12, opacity: 0.92 }}>{data.summary}</div> : null}
       </div>
-
-      {/* セクション */}
       {sections.map((s) => (
-        <div key={s.title} style={{ marginBottom: 18, pageBreakInside: 'avoid' }}>
+        <div key={s.title} style={{ marginBottom: 16 }}>
           <div
             style={{
-              fontSize: 14,
+              fontSize: 13,
               fontWeight: 700,
               color: "#1e40af",
               borderBottom: "2px solid #1e40af",
-              paddingBottom: 6,
-              marginBottom: 10,
+              paddingBottom: 4,
+              marginBottom: 8,
             }}
           >
             {s.title}
@@ -584,29 +537,19 @@ const PrintLayout = React.forwardRef<HTMLDivElement, { data: JobData }>(function
                 <tr key={k} style={{ borderBottom: "1px solid #e5e7eb" }}>
                   <td
                     style={{
-                      width: "28%",
-                      background: "#f9fafb",
-                      padding: "10px 12px",
-                      fontWeight: 600,
-                      fontSize: 10,
-                      color: "#374151",
+                      width: "26%",
+                      background: "#f3f4f6",
+                      padding: "8px 10px",
+                      fontWeight: 700,
+                      fontSize: 11,
+                      color: "#4b5563",
                       verticalAlign: "top",
-                      border: "1px solid #e5e7eb",
                     }}
                   >
                     {k}
                   </td>
-                  <td
-                    style={{
-                      padding: "10px 12px",
-                      fontSize: 10,
-                      verticalAlign: "top",
-                      whiteSpace: "pre-wrap",
-                      border: "1px solid #e5e7eb",
-                      lineHeight: 1.4,
-                    }}
-                  >
-                    {v || "情報なし"}
+                  <td style={{ padding: "8px 10px", fontSize: 11, verticalAlign: "top", whiteSpace: "pre-wrap" }}>
+                    {v || "—"}
                   </td>
                 </tr>
               ))}
@@ -618,8 +561,15 @@ const PrintLayout = React.forwardRef<HTMLDivElement, { data: JobData }>(function
   );
 });
 
-// ヘルパーコンポーネント
-function LabeledInput({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+function LabeledInput({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+}) {
   return (
     <div>
       <label className="block text-xs font-medium text-gray-600 mb-1">{label}</label>
@@ -627,13 +577,23 @@ function LabeledInput({ label, value, onChange }: { label: string; value: string
         type="text"
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+        className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
     </div>
   );
 }
 
-function LabeledTextarea({ label, value, onChange, rows = 3 }: { label: string; value: string; onChange: (v: string) => void; rows?: number }) {
+function LabeledTextarea({
+  label,
+  value,
+  onChange,
+  rows = 3,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  rows?: number;
+}) {
   return (
     <div>
       <label className="block text-xs font-medium text-gray-600 mb-1">{label}</label>
@@ -641,7 +601,7 @@ function LabeledTextarea({ label, value, onChange, rows = 3 }: { label: string; 
         value={value}
         onChange={(e) => onChange(e.target.value)}
         rows={rows}
-        className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+        className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
     </div>
   );
@@ -663,30 +623,22 @@ function EditableSection({
   onAddRow: () => void;
 }) {
   const entries = Object.entries(rows || {});
-  const itemCount = entries.length;
-  
   return (
-    <div className="border rounded-lg p-4 bg-gray-50">
-      <div className="flex items-center justify-between border-b-2 border-blue-600 pb-2 mb-4">
-        <div>
-          <h3 className="font-bold text-gray-800 text-lg">{title}</h3>
-          <p className="text-xs text-gray-500 mt-1">項目数: {itemCount}個</p>
-        </div>
+    <div>
+      <div className="flex items-center justify-between border-b-2 border-blue-600 pb-1 mb-2">
+        <h3 className="font-bold text-gray-800">{title}</h3>
         <button
           type="button"
           onClick={onAddRow}
-          className="text-sm bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg px-3 py-2 font-medium"
+          className="text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded px-2 py-1"
         >
           ＋項目を追加
         </button>
       </div>
-
       {entries.length === 0 ? (
-        <p className="text-sm text-gray-400 italic text-center py-4 bg-white rounded border-2 border-dashed border-gray-200">
-          項目がありません。「＋項目を追加」から追加できます。
-        </p>
+        <p className="text-xs text-gray-400 italic mb-2">項目がありません。「＋項目を追加」から追加できます。</p>
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-2">
           {entries.map(([key, val], idx) => (
             <KeyValueRow
               key={`${idx}-${key}`}
@@ -717,9 +669,7 @@ function KeyValueRow({
   onDelete: () => void;
 }) {
   const [localKey, setLocalKey] = React.useState(rowKey);
-  
   React.useEffect(() => setLocalKey(rowKey), [rowKey]);
-  
   const commitKey = () => {
     const trimmed = localKey.trim();
     if (!trimmed) {
@@ -728,44 +678,35 @@ function KeyValueRow({
     }
     if (trimmed !== rowKey) onRenameKey(trimmed);
   };
-
   return (
-    <div className="bg-white rounded-lg border p-3 shadow-sm">
-      <div className="flex flex-col lg:flex-row gap-3 items-start">
-        <div className="lg:w-1/3">
-          <input
-            type="text"
-            value={localKey}
-            onChange={(e) => setLocalKey(e.target.value)}
-            onBlur={commitKey}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                (e.target as HTMLInputElement).blur();
-              }
-            }}
-            className="w-full border border-gray-200 bg-blue-50 rounded px-3 py-2 text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white"
-            placeholder="項目名"
-          />
-        </div>
-        <div className="flex-1">
-          <textarea
-            value={value}
-            onChange={(e) => onChangeValue(e.target.value)}
-            rows={Math.max(2, Math.min(6, (value || "").split("\n").length + 1))}
-            className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            placeholder="詳細情報を入力..."
-          />
-        </div>
-        <button
-          type="button"
-          onClick={onDelete}
-          title="この項目を削除"
-          className="text-red-500 hover:bg-red-50 border border-red-200 rounded px-3 py-2 text-sm font-medium hover:text-red-700"
-        >
-          🗑 削除
-        </button>
-      </div>
+    <div className="flex flex-col md:flex-row gap-2 items-start">
+      <input
+        type="text"
+        value={localKey}
+        onChange={(e) => setLocalKey(e.target.value)}
+        onBlur={commitKey}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            (e.target as HTMLInputElement).blur();
+          }
+        }}
+        className="md:w-1/4 border border-gray-200 bg-gray-50 rounded px-2 py-1.5 text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+      />
+      <textarea
+        value={value}
+        onChange={(e) => onChangeValue(e.target.value)}
+        rows={Math.max(2, Math.min(6, (value || "").split("\n").length + 1))}
+        className="flex-1 border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+      />
+      <button
+        type="button"
+        onClick={onDelete}
+        title="この項目を削除"
+        className="text-red-500 hover:bg-red-50 border border-red-200 rounded px-2 py-1.5 text-sm"
+      >
+        🗑
+      </button>
     </div>
   );
 }
