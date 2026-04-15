@@ -31,6 +31,19 @@ const SECTION_DEFS: { key: keyof JobData; title: string }[] = [
   { key: "benefits", title: "8. 福利厚生・待遇" },
 ];
 
+// PDF生成用：値が空 or "情報なし" の行を除外
+const EMPTY_VALUES = new Set(["", "情報なし", "なし", "未記載", "—", "-", "N/A", "n/a"]);
+function filterEmptyRows(rows: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(rows || {})) {
+    const trimmed = (v || "").trim();
+    if (!EMPTY_VALUES.has(trimmed)) {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
 export default function Home() {
   const [companyName, setCompanyName] = useState("");
   const [companyUrl, setCompanyUrl] = useState("");
@@ -223,7 +236,7 @@ export default function Home() {
     if (!result) return;
     const title = [result.companyName, result.jobTitle].filter(Boolean).join(" - ") || "求人票";
     const sections: { title: string; rows: Record<string, string> }[] = SECTION_DEFS
-      .map(({ key, title }) => ({ title, rows: ((result as any)[key] || {}) as Record<string, string> }))
+      .map(({ key, title }) => ({ title, rows: filterEmptyRows(((result as any)[key] || {}) as Record<string, string>) }))
       .filter((s) => Object.keys(s.rows).length > 0);
 
     const esc = (s: string) =>
@@ -533,7 +546,7 @@ export default function Home() {
 const PrintLayout = React.forwardRef<HTMLDivElement, { data: JobData }>(function PrintLayout({ data }, ref) {
   const title = [data.companyName, data.jobTitle].filter(Boolean).join(" - ") || "求人票";
   const sections: { title: string; rows: Record<string, string> }[] = SECTION_DEFS
-    .map(({ key, title }) => ({ title, rows: ((data as any)[key] || {}) as Record<string, string> }))
+    .map(({ key, title }) => ({ title, rows: filterEmptyRows(((data as any)[key] || {}) as Record<string, string>) }))
     .filter((s) => Object.keys(s.rows).length > 0);
 
   return (
