@@ -56,7 +56,7 @@ function buildResearchPrompt(
       "- リモートワーク・テレワーク制度",
       "",
       "取得した情報は要約・省略せず、原文に近い形でそのまま出力してください。数値は必ず具体的に記載してください。",
-    ].filter((l) => l !== undefined).join("\n");
+    ].join("\n");
   }
 
   // URL未指定の場合：公式採用プラットフォームを指定検索
@@ -92,7 +92,7 @@ function buildResearchPrompt(
     "- リモートワーク・テレワーク制度",
     "",
     "取得した情報は要約・省略せず、原文に近い形でそのまま出力してください。数値は必ず具体的に記載してください。",
-  ].filter((l) => l !== undefined).join("\n");
+  ].join("\n");
 }
 
 function extractSources(research: any): string[] {
