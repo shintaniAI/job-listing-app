@@ -433,8 +433,9 @@ function isCompanyHomepage(url: string): boolean {
   }
 }
 
-// 優先度を考慮しつつ各層に枠を確保する取得対象選定。
-// 順序: (1) 求人詳細/ATS既知ホスト → (2) 求人媒体(Indeed/doda等) → (3) 会社HPホーム → (4) その他
+// 採用ページ最優先で枠を確保する取得対象選定。
+// 順序: (1) ATS/採用詳細 → (2) 会社HPの採用・会社情報ページ → (3) HPホーム → (4) 求人媒体 → (5) その他
+// 採用ページ不足時の事故を防ぐため ATS 枠を最大化する。
 // Gemini guess が hrmos.co/ や open.talentio.com/ のような会社非依存URLを混ぜることもあるので、
 // ATSホストでも企業スラッグを持たないURLは除外する。
 function pickFetchCandidates(urls: string[], max: number): string[] {
@@ -442,16 +443,25 @@ function pickFetchCandidates(urls: string[], max: number): string[] {
   const usable = urls.filter((u) => !isUselessAtsUrl(u));
   const sorted = sortByPriority(usable);
   const pAts = sorted.filter((u) => isJobDetailUrl(u) || isKnownAtsHost(u));
+  // HP内の採用/会社情報系パスは ATS が無い時の受け皿として ATS 並みに拾う
+  const pRecruitPath = sorted.filter(
+    (u) => !pAts.includes(u) && !isSecondaryJobSite(u) && isRecruitmentPage(u)
+  );
+  const pHome = sorted.filter(
+    (u) => !pAts.includes(u) && !pRecruitPath.includes(u) && !isSecondaryJobSite(u) && isCompanyHomepage(u)
+  );
   const pMedia = sorted.filter((u) => !pAts.includes(u) && isSecondaryJobSite(u));
-  const pHome = sorted.filter((u) => !pAts.includes(u) && !pMedia.includes(u) && isCompanyHomepage(u));
-  const pOther = sorted.filter((u) => !pAts.includes(u) && !pMedia.includes(u) && !pHome.includes(u));
+  const pOther = sorted.filter(
+    (u) => !pAts.includes(u) && !pRecruitPath.includes(u) && !pHome.includes(u) && !pMedia.includes(u)
+  );
 
   const picked: string[] = [];
   const pushUnique = (u: string) => { if (!picked.includes(u)) picked.push(u); };
-  for (const u of pAts.slice(0, 4)) pushUnique(u);
-  for (const u of pMedia.slice(0, 3)) pushUnique(u);
-  for (const u of pHome.slice(0, 2)) pushUnique(u);
-  for (const u of pOther.slice(0, 2)) pushUnique(u);
+  for (const u of pAts.slice(0, 5)) pushUnique(u);           // ATS: 最大5枠
+  for (const u of pRecruitPath.slice(0, 3)) pushUnique(u);   // HP内採用系: 最大3枠
+  for (const u of pHome.slice(0, 2)) pushUnique(u);          // HPホーム: 最大2枠
+  for (const u of pMedia.slice(0, 2)) pushUnique(u);         // 求人媒体: 最大2枠 (補助扱い)
+  for (const u of pOther.slice(0, 2)) pushUnique(u);         // その他: 最大2枠
   return picked.slice(0, max);
 }
 
@@ -629,30 +639,54 @@ async function findOfficialUrlWithGemini(
     "- 似た社名、違う会社、関連しない会社のURLは絶対に含めない",
     "- 検索結果が無い/自信が無い場合は空出力する（間違ったURLを返すより空の方が良い）",
     "",
-    "【検索ヒント：これらのクエリを内部で試してOK】",
+    "【検索ヒント：これらのクエリを内部で試してOK。上から順に優先】",
+    `- "${companyName}" site:talentio.com OR site:hrmos.co OR site:wantedly.com OR site:herp.careers  (ATS最優先)`,
     `- "${companyName}" 採用 OR recruit OR careers`,
     `- "${companyName}" 採用情報 OR 募集要項 OR 職務内容`,
-    `- "${companyName}" site:talentio.com OR site:hrmos.co OR site:wantedly.com OR site:herp.careers`,
-    `- "${companyName}" site:indeed.com OR site:doda.jp OR site:mynavi.jp OR site:rikunabi.com OR site:en-japan.com`,
-    `- "${companyName}" 公式サイト`,
-    `- "${companyName}" 会社概要 事業内容`,
+    `- "${companyName}" 公式サイト OR コーポレートサイト`,
+    `- "${companyName}" 会社概要 OR ミッション OR ビジョン OR バリュー`,
+    `- "${companyName}" site:indeed.com OR site:doda.jp OR site:mynavi.jp OR site:rikunabi.com  (ATS/公式が無い時のフォールバックのみ)`,
     "",
     "【出力したいURL（優先度順）】",
     "1. 求人詳細ページ（Talentio/HRMOS/Wantedly/Herpの個別URL）＝最優先",
     "2. ATS企業ルート（open.talentio.com/r/../c/../ や hrmos.co/pages/.. など個別URLがなければ必須）",
     "3. 会社公式サイトの採用/キャリアページ（/careers/ /recruit/ /saiyou/ 等）",
-    "4. 求人媒体の該当企業ページ（Indeed/doda/マイナビ転職/リクナビNEXT/エン転職/Green/type/ビズリーチ等）",
-    "5. 会社公式サイト（ホーム・会社概要・MVV）＝補助情報用",
+    "4. 会社公式サイト（ホーム・会社概要・MVV）＝HP追加情報用",
+    "5. 求人媒体の該当企業ページ（ATS/公式が一切見つからない時のみ補助）",
     "",
     "見つけたURLを全てhttps://付きで1行ずつ出力（最大12件）。説明・番号・記号不要。",
   ].join("\n");
 
-  const [groundRes, guessRes] = await Promise.all([
-    runGroundedSearch(ai, broadPrompt, 15000, "公式URL検索"),
+  // リサーチ用クエリ: 採用ページ以外に取り込みたい会社情報（HP/会社概要/MVV/事業/代表メッセージ/沿革）
+  const researchPrompt = [
+    `対象企業: 「${companyName}」(この企業名と完全一致する会社のみ)`,
+    "",
+    "会社情報を補強するために下記トピックが記載されている**会社公式サイト内のページ**を探してください。",
+    "応募者が事前に会社理解を深めるために使う追加情報源です。",
+    "",
+    "【欲しいページ】",
+    "- 会社概要 / About / コーポレートページ (/company/ /about/ /corporate/ 等)",
+    "- ミッション / ビジョン / バリュー / 行動指針 (/mission/ /vision/ /values/ /mvv/ 等)",
+    "- 代表メッセージ / CEOメッセージ / 創業ストーリー",
+    "- 事業紹介 / サービス一覧 / プロダクト紹介",
+    "- 沿革 / ヒストリー",
+    "- カルチャー / 社風 / メンバー紹介 / 働き方",
+    "",
+    "【絶対遵守】",
+    `- 社名が「${companyName}」と完全一致する企業のURLのみ`,
+    "- 似た社名・違う会社・無関係サイトのURLは返さない",
+    "- 確信がない時は空出力",
+    "",
+    "URLのみ1行ずつhttps://付きで出力（最大8件）。説明不要。",
+  ].join("\n");
+
+  const [groundRes, guessRes, researchRes] = await Promise.all([
+    runGroundedSearch(ai, broadPrompt, 15000, "採用URL検索"),
     guessUrlsWithoutGrounding(ai, companyName).catch(() => ({
       urls: [] as string[],
       usage: {},
     })),
+    runGroundedSearch(ai, researchPrompt, 12000, "会社情報リサーチ"),
   ]);
 
   // プログラム生成候補: カタカナ→ローマ字で確実なスラッグを作る
@@ -673,31 +707,36 @@ async function findOfficialUrlWithGemini(
 
   const filteredGrounded = groundRes.urls.filter((u) => !isKnownAtsHost(u) || isPlausibleAtsSlug(u));
   const filteredGuess = guessRes.urls.filter((u) => !isKnownAtsHost(u) || isPlausibleAtsSlug(u));
+  const filteredResearch = researchRes.urls.filter((u) => !isKnownAtsHost(u) || isPlausibleAtsSlug(u));
 
   const merged = dedupeUrls(Array.from(
-    new Set([...filteredGrounded, ...filteredGuess, ...deterministicUrls])
+    new Set([...filteredGrounded, ...filteredGuess, ...deterministicUrls, ...filteredResearch])
   ));
   const sorted = sortByPriority(merged);
   console.log(
-    `[search] grounded:${groundRes.urls.length}(有効${filteredGrounded.length}) 推測:${guessRes.urls.length}(有効${filteredGuess.length}) 機械生成:${deterministicUrls.length} → 統合${sorted.length}件`
+    `[search] 採用grounded:${groundRes.urls.length}(有効${filteredGrounded.length}) 推測:${guessRes.urls.length}(有効${filteredGuess.length}) 会社情報research:${researchRes.urls.length}(有効${filteredResearch.length}) 機械生成:${deterministicUrls.length} → 統合${sorted.length}件`
   );
   console.log(`[search] ローマ字候補:`, slugCandidates);
 
   const usage = {
     promptTokenCount:
       (groundRes.usage?.promptTokenCount || 0) +
-      ((guessRes as any).usage?.promptTokenCount || 0),
+      ((guessRes as any).usage?.promptTokenCount || 0) +
+      (researchRes.usage?.promptTokenCount || 0),
     candidatesTokenCount:
       (groundRes.usage?.candidatesTokenCount || 0) +
-      ((guessRes as any).usage?.candidatesTokenCount || 0),
+      ((guessRes as any).usage?.candidatesTokenCount || 0) +
+      (researchRes.usage?.candidatesTokenCount || 0),
   };
 
   const debug = {
     grounded: (groundRes as any).debug,
+    research: (researchRes as any).debug,
     guessUrls: guessRes.urls,
   };
 
-  return { urls: sorted.slice(0, 12), usage, debug } as any;
+  // 採用3枠 + HP採用系3枠 + HPホーム2枠 + 求人媒体2枠 + その他2枠 を最大限取れるよう上限を拡大
+  return { urls: sorted.slice(0, 16), usage, debug } as any;
 }
 
 // ---------- 複数ポジション検出 ----------
@@ -1081,8 +1120,8 @@ export async function POST(req: NextRequest) {
 
     // Step 2: Jina Reader で優先度バランスを取って最大7件を並列取得
     // ATS系(優先1)だけを拾うと homepages が落ちて Stage2 クロールの起点を失うため、
-    // 会社HP(優先2)も確実に枠確保
-    const fetchCandidates = pickFetchCandidates(targetUrls, 7);
+    // 会社HP(優先2)も確実に枠確保。採用ページ＋HP+補助情報を合わせて10件取得。
+    const fetchCandidates = pickFetchCandidates(targetUrls, 10);
     console.log(`[fetch] Jina Readerで並列取得: ${fetchCandidates.length}件`, fetchCandidates);
     const contents: { url: string; text: string }[] = [];
     const MIN_TEXT_LEN = 150;
@@ -1353,31 +1392,41 @@ export async function POST(req: NextRequest) {
     }));
     scored.sort((a, b) => b.score - a.score);
 
-    const MAX_CHARS = 80000;
-    // 採用ページを最優先ソースに固定: 求人詳細URLが無くてもATSや/careers/等ならPRIMARY扱い
+    const MAX_CHARS = 100000;
+    // 採用ページを最優先ソースに固定: ATS > HP内採用ページ > 求人媒体 の順で正本選定
+    const recruitmentRank = (u: string): number => {
+      if (isJobDetailUrl(u) || isKnownAtsHost(u)) return 0;  // ATS最優先
+      if (isRecruitmentPage(u) && !isSecondaryJobSite(u)) return 1; // HP内採用系
+      if (isSecondaryJobSite(u)) return 2; // 求人媒体 (フォールバック)
+      return 3;
+    };
     const recruitmentSorted = [...scored].sort((a, b) => {
-      const ar = isRecruitmentPage(a.url) ? 0 : 1;
-      const br = isRecruitmentPage(b.url) ? 0 : 1;
+      const ar = recruitmentRank(a.url);
+      const br = recruitmentRank(b.url);
       if (ar !== br) return ar - br;
       return b.score - a.score;
     });
     const topSource = recruitmentSorted[0];
+    const topIsAts = isJobDetailUrl(topSource.url) || isKnownAtsHost(topSource.url);
     const topIsRecruitment = isRecruitmentPage(topSource.url);
-    const hasRichPrimary = topIsRecruitment && topSource.text.length > 2000;
+    // ATSは閾値緩め (SPA/薄いページでも正本化)、HP採用系・求人媒体は3000字以上で正本化
+    const hasRichPrimary = topIsAts
+      ? topSource.text.length > 1500
+      : topIsRecruitment && topSource.text.length > 3000;
 
     let merged: string;
     if (hasRichPrimary) {
-      // 採用ページが取得できた → PRIMARY扱いで60k、HP等の補助ソースは20kを分配
-      const PRIMARY_BUDGET = 60000;
-      const OTHER_BUDGET = 20000;
+      // 採用ページが取得できた → PRIMARY に厚く予算配分 (70k)、HP等の補助ソースは30kを分配
+      const PRIMARY_BUDGET = 70000;
+      const OTHER_BUDGET = 30000;
       const primaryText = topSource.text.slice(0, PRIMARY_BUDGET);
-      const others = recruitmentSorted.slice(1, 5);
+      const others = recruitmentSorted.slice(1, 6);
       const perOther = others.length > 0 ? Math.floor(OTHER_BUDGET / others.length) : 0;
       const othersBlock = others
-        .map((c) => `=== 補助ソース (HP等／採用ページに無い追加情報用): ${c.url} ===\n${c.text.slice(0, perOther)}`)
+        .map((c) => `=== 補助ソース (HP/会社概要/求人媒体等 — 採用ページに無い追加情報を取り込む用): ${c.url} ===\n${c.text.slice(0, perOther)}`)
         .join("\n\n---\n\n");
       merged =
-        `=== PRIMARY SOURCE (採用ページ／このソースの情報を全て網羅的に転記): ${topSource.url} ===\n${primaryText}` +
+        `=== PRIMARY SOURCE (採用ページ／このソースの情報は必ず全項目網羅的に転記する): ${topSource.url} ===\n${primaryText}` +
         (othersBlock ? `\n\n---\n\n${othersBlock}` : "");
       if (merged.length > MAX_CHARS) merged = merged.slice(0, MAX_CHARS);
       console.log(
