@@ -32,16 +32,23 @@ const SECTION_DEFS: { key: keyof JobData; title: string }[] = [
 ];
 
 // PDF生成用：値が空 or "情報なし" の行を除外
-const EMPTY_VALUES = new Set(["", "情報なし", "なし", "未記載", "—", "-", "N/A", "n/a"]);
+const EMPTY_VALUES = new Set(["", "情報なし", "なし", "未記載", "—", "-", "N/A", "n/a", "該当なし", "未定"]);
+function isEmptyValue(v: any): boolean {
+  if (v === null || v === undefined) return true;
+  const trimmed = String(v).trim();
+  return EMPTY_VALUES.has(trimmed);
+}
 function filterEmptyRows(rows: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(rows || {})) {
-    const trimmed = (v || "").trim();
-    if (!EMPTY_VALUES.has(trimmed)) {
-      out[k] = v;
-    }
+    if (!isEmptyValue(v)) out[k] = v;
   }
   return out;
+}
+// タイトル等のトップレベル文字列用: 「情報なし」等は空扱い
+function cleanText(v: any): string {
+  if (isEmptyValue(v)) return "";
+  return String(v).trim();
 }
 
 export default function Home() {
@@ -234,7 +241,8 @@ export default function Home() {
 
   const handlePrintPdf = () => {
     if (!result) return;
-    const title = [result.companyName, result.jobTitle].filter(Boolean).join(" - ") || "求人票";
+    const title = [cleanText(result.companyName), cleanText(result.jobTitle)].filter(Boolean).join(" - ") || "求人票";
+    const summaryClean = cleanText(result.summary);
     const sections: { title: string; rows: Record<string, string> }[] = SECTION_DEFS
       .map(({ key, title }) => ({ title, rows: filterEmptyRows(((result as any)[key] || {}) as Record<string, string>) }))
       .filter((s) => Object.keys(s.rows).length > 0);
@@ -270,20 +278,20 @@ export default function Home() {
     )}</title><style>
       @page { size: A4; margin: 14mm; }
       * { box-sizing: border-box; }
-      body { font-family: "Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic","Meiryo","Noto Sans JP",system-ui,sans-serif; color:#222; font-size:12px; line-height:1.8; letter-spacing:0.02em; margin:0; padding:24px; }
+      body { font-family: "Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic","Meiryo","Noto Sans JP",system-ui,sans-serif; color:#222; font-size:12px; line-height:1.6; letter-spacing:0.02em; margin:0; padding:24px; }
       .header { background:#1e40af; color:#fff; padding:16px 20px; border-radius:6px; margin-bottom:20px; }
       .header h1 { font-size:20px; margin:0 0 4px; line-height:1.5; }
-      .header p { font-size:12px; margin:0; opacity:0.92; line-height:1.7; }
+      .header p { font-size:12px; margin:0; opacity:0.92; line-height:1.6; }
       .section { margin-bottom:18px; page-break-inside: avoid; }
-      .section h2 { font-size:13px; color:#1e40af; border-bottom:2px solid #1e40af; padding-bottom:4px; margin:0 0 8px; line-height:1.6; }
+      .section h2 { font-size:13px; color:#1e40af; border-bottom:2px solid #1e40af; padding-bottom:4px; margin:0 0 8px; line-height:1.5; }
       table { width:100%; border-collapse:collapse; }
-      th, td { padding:12px 14px; font-size:11px; line-height:1.75; vertical-align:middle; border:1px solid #e5e7eb; }
+      th, td { padding:10px 14px; font-size:11px; line-height:1.6; vertical-align:middle; border:1px solid #e5e7eb; }
       th { width:26%; background:#f3f4f6; color:#4b5563; font-weight:700; text-align:left; }
       td { white-space:pre-wrap; word-break:break-word; }
     </style></head><body>
       <div class="header">
         <h1>${esc(title)}</h1>
-        ${result.summary ? `<p>${esc(result.summary)}</p>` : ""}
+        ${summaryClean ? `<p>${esc(summaryClean)}</p>` : ""}
       </div>
       ${sectionsHtml}
       <script>
@@ -539,7 +547,8 @@ export default function Home() {
 
 // 印刷レイアウトコンポーネント
 const PrintLayout = React.forwardRef<HTMLDivElement, { data: JobData }>(function PrintLayout({ data }, ref) {
-  const title = [data.companyName, data.jobTitle].filter(Boolean).join(" - ") || "求人票";
+  const title = [cleanText(data.companyName), cleanText(data.jobTitle)].filter(Boolean).join(" - ") || "求人票";
+  const summaryClean = cleanText(data.summary);
   const sections: { title: string; rows: Record<string, string> }[] = SECTION_DEFS
     .map(({ key, title }) => ({ title, rows: filterEmptyRows(((data as any)[key] || {}) as Record<string, string>) }))
     .filter((s) => Object.keys(s.rows).length > 0);
@@ -558,15 +567,15 @@ const PrintLayout = React.forwardRef<HTMLDivElement, { data: JobData }>(function
         color: "#222",
         fontFamily: '"Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", "Noto Sans JP", system-ui, sans-serif',
         fontSize: "11px",
-        lineHeight: 1.8,
+        lineHeight: 1.6,
         letterSpacing: "0.02em",
         boxSizing: "border-box",
       }}
     >
       {/* ヘッダー */}
       <div style={{ background: "#1e40af", color: "#fff", padding: "20px 24px", borderRadius: 6, marginBottom: 24 }}>
-        <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 6, lineHeight: 1.5 }}>{title}</div>
-        {data.summary ? <div style={{ fontSize: 13, opacity: 0.92, lineHeight: 1.7 }}>{data.summary}</div> : null}
+        <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 6, lineHeight: 1.4 }}>{title}</div>
+        {summaryClean ? <div style={{ fontSize: 13, opacity: 0.92, lineHeight: 1.6 }}>{summaryClean}</div> : null}
       </div>
 
       {/* セクション */}
@@ -593,13 +602,13 @@ const PrintLayout = React.forwardRef<HTMLDivElement, { data: JobData }>(function
                     style={{
                       width: "28%",
                       background: "#f9fafb",
-                      padding: "14px 14px",
+                      padding: "10px 14px",
                       fontWeight: 600,
                       fontSize: 10,
                       color: "#374151",
                       verticalAlign: "middle",
                       border: "1px solid #e5e7eb",
-                      lineHeight: 1.7,
+                      lineHeight: 1.6,
                       wordBreak: "break-word",
                     }}
                   >
@@ -607,12 +616,12 @@ const PrintLayout = React.forwardRef<HTMLDivElement, { data: JobData }>(function
                   </td>
                   <td
                     style={{
-                      padding: "14px 14px",
+                      padding: "10px 14px",
                       fontSize: 10,
                       verticalAlign: "middle",
                       whiteSpace: "pre-wrap",
                       border: "1px solid #e5e7eb",
-                      lineHeight: 1.8,
+                      lineHeight: 1.6,
                       wordBreak: "break-word",
                     }}
                   >

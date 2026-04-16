@@ -296,11 +296,20 @@ export async function POST(req: NextRequest) {
       merged
     );
 
+    // "情報なし" 系の値は空文字に戻す（フロント表示対策）
+    const EMPTY_SET = new Set(["情報なし", "なし", "未記載", "—", "-", "N/A", "n/a", "該当なし", "未定"]);
+    const normalizeEmpty = (v: any): string => {
+      if (v === null || v === undefined) return "";
+      const s = String(v).trim();
+      return EMPTY_SET.has(s) ? "" : s;
+    };
+
     // ユーザー入力で上書き
     if (companyName) jobData.companyName = companyName;
     if (jobTitle) jobData.jobTitle = jobTitle;
-    jobData.companyName = jobData.companyName || "";
-    jobData.jobTitle = jobData.jobTitle || "";
+    jobData.companyName = normalizeEmpty(jobData.companyName);
+    jobData.jobTitle = normalizeEmpty(jobData.jobTitle);
+    if (jobData.summary) jobData.summary = normalizeEmpty(jobData.summary);
     if (salary) {
       jobData.salary = jobData.salary || {};
       jobData.salary["基本給"] = salary;
