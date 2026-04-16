@@ -1512,19 +1512,29 @@ export async function POST(req: NextRequest) {
 
         // ATS homes/ルートページは SPA のため markdown には個別求人リンクが無い。
         // 並行して HTML 版も取得し data-link-url / publishedUrl から抽出する。
-        const stage2Results = await Promise.allSettled(
-          stage2Candidates.map(async (url) => {
-            if (shouldHtmlExtractAts(url)) {
-              const [text, pagesUrls] = await Promise.all([
-                fetchJinaReader(url, 8000),
-                extractAtsLinksFromPage(url, 7000),
-              ]);
-              return { url, text, pagesUrls };
-            }
-            const text = await fetchJinaReader(url, 8000);
-            return { url, text, pagesUrls: [] as string[] };
-          })
-        );
+        // Jina 429 対策でバッチ化 (6件ずつ、間に300ms)
+        const BATCH2 = 6;
+        const stage2Results: PromiseSettledResult<{ url: string; text: string; pagesUrls: string[] }>[] = [];
+        for (let i = 0; i < stage2Candidates.length; i += BATCH2) {
+          const batch = stage2Candidates.slice(i, i + BATCH2);
+          const batchResults = await Promise.allSettled(
+            batch.map(async (url) => {
+              if (shouldHtmlExtractAts(url)) {
+                const [text, pagesUrls] = await Promise.all([
+                  fetchJinaReader(url, 8000),
+                  extractAtsLinksFromPage(url, 7000),
+                ]);
+                return { url, text, pagesUrls };
+              }
+              const text = await fetchJinaReader(url, 8000);
+              return { url, text, pagesUrls: [] as string[] };
+            })
+          );
+          stage2Results.push(...batchResults);
+          if (i + BATCH2 < stage2Candidates.length) {
+            await new Promise((r) => setTimeout(r, 300));
+          }
+        }
 
         const htmlDiscoveredPages: string[] = [];
         for (const r of stage2Results) {
@@ -1569,17 +1579,29 @@ export async function POST(req: NextRequest) {
             stage3Discovered.add(u);
           }
         }
-        // 最大8件、sortByPriority で /workplace/ /benefit/ /salary/ 系を優先
-        const stage3Candidates = sortByPriority([...stage3Discovered]).slice(0, 8);
+        // 最大6件、sortByPriority で /workplace/ /benefit/ /salary/ 系を優先
+        // Jinaレート制限対策で 8→6 に縮小＋3件ずつ2バッチに分割（間に500ms待機）
+        const stage3Candidates = sortByPriority([...stage3Discovered]).slice(0, 6);
         crawlDebug.stage3.candidates = stage3Candidates;
         if (stage3Candidates.length > 0) {
-          console.log(`[crawl] Stage3: 個別求人詳細URL ${stage3Candidates.length}件`);
+          console.log(`[crawl] Stage3: ハブ配下URL ${stage3Candidates.length}件`);
           console.log(`[crawl] Stage3対象:`, stage3Candidates);
-          const stage3Results = await Promise.allSettled(
-            stage3Candidates.map((url) =>
-              fetchJinaReader(url, 7000).then((text) => ({ url, text }))
-            )
-          );
+          // バッチ化: Jina 429 バースト回避 (Stage2 12件 + Stage3 8件を一気に並列すると必ず刺さる)
+          const BATCH = 3;
+          const stage3Results: PromiseSettledResult<{ url: string; text: string }>[] = [];
+          for (let i = 0; i < stage3Candidates.length; i += BATCH) {
+            const batch = stage3Candidates.slice(i, i + BATCH);
+            const batchResults = await Promise.allSettled(
+              batch.map((url) =>
+                fetchJinaReader(url, 9000).then((text) => ({ url, text }))
+              )
+            );
+            stage3Results.push(...batchResults);
+            // 最終バッチでなければ500ms待機
+            if (i + BATCH < stage3Candidates.length) {
+              await new Promise((r) => setTimeout(r, 500));
+            }
+          }
           for (const r of stage3Results) {
             if (r.status === "fulfilled" && r.value.text && r.value.text.length > MIN_TEXT_LEN) {
               if (nameTokens.length === 0 || textMentionsCompany(r.value.text, nameTokens)) {
