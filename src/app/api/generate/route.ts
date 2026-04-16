@@ -65,6 +65,37 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 }
 
 // ---------- Jina Reader: URLからMarkdown全文取得 ----------
+// プラットフォーム(Wantedly/Talentio/HRMOS等)自身のマーケ/フッター/ナビ文を除去する。
+// これらはどの会社ページにも出るので、LLMが会社情報として誤抽出しないよう事前に削る。
+const PLATFORM_BOILERPLATE_PATTERNS: RegExp[] = [
+  // Wantedly 共通マーケ文
+  /Wantedlyは、?\s*\d+\s*万人のユーザーと\s*\d+,?\d*\s*社が利用するビジネスSNS。?[^\n]*/g,
+  /共感を軸にした新しい挑戦との出会い[^\n]*/g,
+  /あなただけのキャリア実績の記録をつくり[^\n]*/g,
+  /Wantedly\s*,?\s*Inc\.[^\n]*/g,
+  /©\s*Wantedly[^\n]*/g,
+  // Talentio 共通
+  /このサイトは採用管理システム「Talentio」で作成されています/g,
+  /Powered by Talentio[^\n]*/g,
+  // HRMOS 共通
+  /このページは採用管理システム「HRMOS採用」で作成されています/g,
+  /Powered by HRMOS[^\n]*/g,
+  // Herp 共通
+  /Powered by HERP[^\n]*/g,
+  // 各社共通のプライバシー/利用規約フッター
+  /プライバシーポリシー\s*\|\s*利用規約[^\n]*/g,
+];
+
+function stripPlatformBoilerplate(text: string): string {
+  let out = text;
+  for (const p of PLATFORM_BOILERPLATE_PATTERNS) {
+    out = out.replace(p, "");
+  }
+  // 3行以上連続した空行を1行に畳む
+  out = out.replace(/\n{3,}/g, "\n\n");
+  return out.trim();
+}
+
 async function fetchJinaReader(url: string, timeoutMs = 20000): Promise<string> {
   const target = `https://r.jina.ai/${url}`;
   const ctrl = new AbortController();
@@ -82,8 +113,8 @@ async function fetchJinaReader(url: string, timeoutMs = 20000): Promise<string> 
     if (!res.ok) {
       throw new Error(`Jina Reader取得失敗: ${res.status} ${res.statusText}`);
     }
-    const text = await res.text();
-    return text;
+    const raw = await res.text();
+    return stripPlatformBoilerplate(raw);
   } catch (e: any) {
     if (e?.name === "AbortError") throw new Error(`Jina Readerタイムアウト(${timeoutMs}ms): ${url}`);
     throw e;
@@ -871,6 +902,8 @@ const COMMON_RULES = `【絶対ルール】
 - **推測・創作・要約・短縮は完全禁止**。提供された原文（公式採用ページ・求人媒体含む）に書かれていないことは絶対に書かない／書かれていることを端折らない
 
 【ソースの扱い】
+- **プラットフォーム自身のマーケティング文は絶対に使わない**: Wantedly/Talentio/HRMOS/Herp 等の採用管理システムが自社を紹介する文言（例:「Wantedlyは〇〇万人のユーザーと〇〇社が利用するビジネスSNS」「共感を軸にした新しい挑戦」「あなただけのキャリア実績の記録をつくり〜」「このサイトは採用管理システム『Talentio/HRMOS』で作成されています」等）は、対象企業とは無関係のため出力に含めてはいけない。同様に Indeed/doda/マイナビ/リクナビ/エン 等の求人媒体プラットフォーム自身の宣伝文も除外する
+- 対象企業「(会社名)」自身が書いた文章のみを抽出する。プラットフォームの定型文・フッター・ナビゲーション・広告は無視
 - 採用ページ(PRIMARY)は全て転記。HP/会社概要/求人媒体(Indeed/doda/マイナビ転職/リクナビNEXT/エン転職/Green/type/ビズリーチ等)は追加情報源として、採用ページに無い事実があれば追加する
 - 求人媒体には以下のような「ATSに無い求職者目線の情報」が載っていることが多い。**見つけたら必ず取り込む**:
   * 募集背景・組織拡大の理由・ポジション新設の経緯
@@ -998,16 +1031,17 @@ async function generateCompanyPart(
 
   const result = await withTimeout(
     ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      // Pro に昇格: プラットフォームのマーケ文と会社自身の情報を区別する判断力が必要
+      model: "gemini-2.5-pro",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
         temperature: 0.1,
         maxOutputTokens: 20000,
-        thinkingConfig: { thinkingBudget: 0 },
+        thinkingConfig: { thinkingBudget: 0 }, // Proでも thinking 無効で高速化
       } as any,
     }),
-    22000,
+    32000,
     "Gemini(企業パート生成)"
   );
 
@@ -1047,7 +1081,7 @@ async function generatePositionPart(
 
   const result = await withTimeout(
     ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: "gemini-2.5-pro",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -1056,7 +1090,7 @@ async function generatePositionPart(
         thinkingConfig: { thinkingBudget: 0 },
       } as any,
     }),
-    22000,
+    32000,
     "Gemini(ポジションパート生成)"
   );
 
