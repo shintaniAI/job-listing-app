@@ -29,6 +29,44 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   });
 }
 
+// 3.1-pro-preview → 2.5-pro → 2.5-flash の多段フォールバック
+const MODEL_CHAIN = ["gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash"];
+
+function isRetryableGeminiError(err: any): boolean {
+  const msg = String(err?.message || err || "");
+  return /\b503\b|\b404\b|UNAVAILABLE|RESOURCE_EXHAUSTED|NOT_FOUND|not found|experiencing high demand|overloaded|deadline|タイムアウト/i.test(
+    msg
+  );
+}
+
+async function generateWithFallback<T>(
+  ai: GoogleGenAI,
+  buildRequest: (model: string) => any,
+  timeoutMs: number,
+  label: string,
+  models: string[] = MODEL_CHAIN
+): Promise<T> {
+  let lastErr: any;
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i];
+    try {
+      const res = await withTimeout(
+        ai.models.generateContent(buildRequest(model)),
+        timeoutMs,
+        `${label}[${model}]`
+      );
+      if (i > 0) console.log(`[gemini] ${label}: ${model} でフォールバック成功`);
+      return res as T;
+    } catch (e: any) {
+      lastErr = e;
+      const retryable = isRetryableGeminiError(e);
+      console.log(`[gemini] ${label} ${model} 失敗 (retryable=${retryable}): ${e.message}`);
+      if (!retryable) throw e;
+    }
+  }
+  throw lastErr;
+}
+
 // Wantedly等プラットフォーム自身のマーケ文除去
 const PLATFORM_BOILERPLATE_PATTERNS: RegExp[] = [
   /Wantedlyは、?\s*\d+\s*万人のユーザーと\s*\d+,?\d*\s*社が利用するビジネスSNS。?[^\n]*/g,
@@ -183,7 +221,8 @@ export async function POST(req: NextRequest) {
       throw new Error("採用ページの再取得に失敗しました");
     }
 
-    const merged = texts.join("\n\n---\n\n").slice(0, 80000);
+    // 3.1 Pro (1M token) を活かして余裕を持った投入。網羅性UP。
+    const merged = texts.join("\n\n---\n\n").slice(0, 120000);
 
     const prompt = [
       POSITION_INSTRUCTION,
@@ -197,20 +236,21 @@ export async function POST(req: NextRequest) {
       "上記の**採用ページ原文からのみ**、このポジション固有の情報をJSONで返してください。",
     ].join("\n");
 
-    const result = await withTimeout(
-      ai.models.generateContent({
-        model: "gemini-2.5-pro",
+    const result = await generateWithFallback<any>(
+      ai,
+      (model) => ({
+        model,
         contents: prompt,
         config: {
           responseMimeType: "application/json",
           temperature: 0.1,
           maxOutputTokens: 12000,
-          // Pro は thinking 必須なので最小値
-          thinkingConfig: { thinkingBudget: 128 },
+          // Pro 系は thinking 必須、Flash は 0 でOK
+          thinkingConfig: { thinkingBudget: model.includes("pro") ? 256 : 0 },
         } as any,
       }),
       50000,
-      "Gemini(ポジション詳細生成)"
+      "ポジション詳細生成"
     );
 
     let parsed: any;

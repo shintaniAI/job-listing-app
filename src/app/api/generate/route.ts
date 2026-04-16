@@ -66,6 +66,51 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   });
 }
 
+// 503/UNAVAILABLE (Pro 過負荷) の場合、別モデルへ自動フォールバックする高レベルラッパ。
+// 1st: Pro を試す → 失敗 or 503 → Flash に即切替
+// ハルシネーション抑制のため最重要ルールが効けば Flash でも出力品質は許容範囲。
+function isRetryableGeminiError(err: any): boolean {
+  const msg = String(err?.message || err || "");
+  // 503 / UNAVAILABLE / RESOURCE_EXHAUSTED / deadline / タイムアウト / モデル未提供(404/NOT_FOUND) を対象
+  // 404/NOT_FOUND: 3.1-pro-preview がプロジェクトで未解放の場合に発生する → 次モデルへ降格
+  return /\b503\b|\b404\b|UNAVAILABLE|RESOURCE_EXHAUSTED|NOT_FOUND|not found|experiencing high demand|overloaded|deadline|タイムアウト/i.test(
+    msg
+  );
+}
+
+// モデル階層: 3.1 Pro Preview (最高品質) → 2.5 Pro (安定) → 2.5 Flash (高速フォールバック)
+// 3.1 Pro は現在 preview で 503 も出やすいので、多段で確実に応答を返す設計。
+const MODEL_CHAIN = ["gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash"];
+
+async function generateWithFallback<T>(
+  ai: GoogleGenAI,
+  buildRequest: (model: string) => Parameters<GoogleGenAI["models"]["generateContent"]>[0],
+  timeoutMs: number,
+  label: string,
+  models: string[] = MODEL_CHAIN
+): Promise<T> {
+  let lastErr: any;
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i];
+    try {
+      const res = await withTimeout(
+        ai.models.generateContent(buildRequest(model)),
+        timeoutMs,
+        `${label}[${model}]`
+      );
+      if (i > 0) console.log(`[gemini] ${label}: ${model} でフォールバック成功`);
+      return res as T;
+    } catch (e: any) {
+      lastErr = e;
+      const retryable = isRetryableGeminiError(e);
+      console.log(`[gemini] ${label} ${model} 失敗 (retryable=${retryable}): ${e.message}`);
+      if (!retryable) throw e; // 致命的エラーは即throw
+      // 次のモデルへフォールバック
+    }
+  }
+  throw lastErr;
+}
+
 // ---------- Jina Reader: URLからMarkdown全文取得 ----------
 // プラットフォーム(Wantedly/Talentio/HRMOS等)自身のマーケ/フッター/ナビ文を除去する。
 // これらはどの会社ページにも出るので、LLMが会社情報として誤抽出しないよう事前に削る。
@@ -600,20 +645,21 @@ async function runGroundedSearch(
   label: string
 ): Promise<{ urls: string[]; usage: any; debug: any }> {
   try {
-    // 検索/リサーチは採用ページ発見の精度が最重要 → Pro モデルを使い grounding の判断を賢くする
-    const result = await withTimeout(
-      ai.models.generateContent({
-        model: "gemini-2.5-pro",
+    // 検索/リサーチは採用ページ発見の精度が最重要 → 3.1 Pro Preview > 2.5 Pro > 2.5 Flash の多段で確実性担保
+    const result = await generateWithFallback<any>(
+      ai,
+      (model) => ({
+        model,
         contents: prompt,
         config: {
           tools: [{ googleSearch: {} }],
           temperature: 0,
-          // Pro は thinking がデフォで効く。採用ページ判断に少し予算を与える
-          thinkingConfig: { thinkingBudget: 512 },
+          // Pro 系は thinking 必須、Flash は 0 でOK
+          thinkingConfig: { thinkingBudget: model.includes("pro") ? 512 : 0 },
         } as any,
       }),
       timeoutMs,
-      `Gemini(${label})`
+      label
     );
     const text = result.text || "";
     const direct = extractUrls(text);
@@ -1040,21 +1086,22 @@ async function generateCompanyPart(
     "上記の**採用ページ原文からのみ**、企業全体の情報をJSONで返してください。原文にない情報は書かないでください。",
   ].join("\n");
 
-  const result = await withTimeout(
-    ai.models.generateContent({
-      // Pro に昇格: プラットフォームのマーケ文と会社自身の情報を区別する判断力が必要
-      model: "gemini-2.5-pro",
+  // 3.1-pro-preview → 2.5-pro → 2.5-flash で多段フォールバック
+  const result = await generateWithFallback<any>(
+    ai,
+    (model) => ({
+      model,
       contents: prompt,
       config: {
         responseMimeType: "application/json",
         temperature: 0.1,
         maxOutputTokens: 20000,
-        // Pro は thinking 必須。最小の 128 に抑えて速度を確保
-        thinkingConfig: { thinkingBudget: 128 },
+        // Pro 系は thinking 必須。Flash は 0 で可。
+        thinkingConfig: { thinkingBudget: model.includes("pro") ? 256 : 0 },
       } as any,
     }),
-    40000,
-    "Gemini(企業パート生成)"
+    35000,
+    "企業パート生成"
   );
 
   const text = result.text || "";
@@ -1091,19 +1138,21 @@ async function generatePositionPart(
     "上記の**採用ページ原文からのみ**、ポジション固有の情報をJSONで返してください。原文にない情報は書かないでください。",
   ].join("\n");
 
-  const result = await withTimeout(
-    ai.models.generateContent({
-      model: "gemini-2.5-pro",
+  const result = await generateWithFallback<any>(
+    ai,
+    (model) => ({
+      model,
       contents: prompt,
       config: {
         responseMimeType: "application/json",
         temperature: 0.1,
         maxOutputTokens: 20000,
-        thinkingConfig: { thinkingBudget: 128 },
+        // Pro 系(2.5-pro / 3.1-pro-preview)のみ thinkingBudget>0 を必須とする
+        thinkingConfig: { thinkingBudget: model.includes("pro") ? 256 : 0 },
       } as any,
     }),
     40000,
-    "Gemini(ポジションパート生成)"
+    "ポジションパート生成"
   );
 
   const text = result.text || "";
@@ -1517,7 +1566,8 @@ export async function POST(req: NextRequest) {
     }));
     scored.sort((a, b) => b.score - a.score);
 
-    const MAX_CHARS = 100000;
+    // 3.1 Pro (1M token context) を活かして従来より多く投入。原文網羅性UP。
+    const MAX_CHARS = 140000;
     // 採用ページを最優先ソースに固定: ATS > HP内採用ページ > 求人媒体 の順で正本選定
     const recruitmentRank = (u: string): number => {
       if (isJobDetailUrl(u) || isKnownAtsHost(u)) return 0;  // ATS最優先
@@ -1541,9 +1591,9 @@ export async function POST(req: NextRequest) {
 
     let merged: string;
     if (hasRichPrimary) {
-      // 採用ページが取得できた → PRIMARY に厚く予算配分 (70k)、HP等の補助ソースは30kを分配
-      const PRIMARY_BUDGET = 70000;
-      const OTHER_BUDGET = 30000;
+      // 採用ページが取得できた → PRIMARY に厚く予算配分 (100k)、HP等の補助ソースは40kを分配
+      const PRIMARY_BUDGET = 100000;
+      const OTHER_BUDGET = 40000;
       const primaryText = topSource.text.slice(0, PRIMARY_BUDGET);
       const others = recruitmentSorted.slice(1, 6);
       const perOther = others.length > 0 ? Math.floor(OTHER_BUDGET / others.length) : 0;
@@ -1751,7 +1801,7 @@ export async function POST(req: NextRequest) {
     const usdToJpy = 155;
 
     jobData._meta = {
-      engine: "jina-reader + gemini-2.5-flash",
+      engine: "jina-reader + gemini-3.1-pro-preview (fallback: 2.5-pro, 2.5-flash)",
       elapsed_ms: Date.now() - startedAt,
       source_chars: merged.length,
       source_count: contents.length,
