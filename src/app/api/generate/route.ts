@@ -96,6 +96,31 @@ function isBlockedUrl(url: string): boolean {
   return BLOCKED_SITES.some((b) => lower.includes(b));
 }
 
+// 会社名から「株式会社」等の法人格修飾子を除去した核トークンを抽出
+function companyNameTokens(companyName: string): string[] {
+  if (!companyName) return [];
+  const stripped = companyName
+    .replace(/株式会社|有限会社|合同会社|合資会社|合名会社|一般社団法人|一般財団法人|公益社団法人|公益財団法人|学校法人|医療法人|社会福祉法人|特定非営利活動法人|ＮＰＯ法人|NPO法人/g, "")
+    .replace(/（株）|\(株\)|（有）|\(有\)/g, "")
+    .replace(/,?\s*(Inc|Corp|Corporation|Co\.?,?\s*Ltd\.?|Ltd\.?|LLC|K\.K\.)\.?/gi, "")
+    .trim();
+  const tokens = new Set<string>();
+  if (stripped && stripped.length >= 2) tokens.add(stripped.toLowerCase());
+  if (companyName.trim().length >= 2) tokens.add(companyName.trim().toLowerCase());
+  // スペース・中点区切りの部分語も登録
+  for (const part of stripped.split(/[\s・／/]+/)) {
+    if (part.length >= 3) tokens.add(part.toLowerCase());
+  }
+  return [...tokens];
+}
+
+// Jina取得テキストが対象会社のものか判定（会社名のどれかを含めばOK）
+function textMentionsCompany(text: string, tokens: string[]): boolean {
+  if (tokens.length === 0) return true;
+  const lower = text.toLowerCase();
+  return tokens.some((t) => lower.includes(t));
+}
+
 function isJobDetailUrl(url: string): boolean {
   return JOB_DETAIL_PATTERNS.some((p) => p.test(url));
 }
@@ -134,20 +159,21 @@ async function guessUrlsWithoutGrounding(
   companyName: string
 ): Promise<{ urls: string[]; usage: any }> {
   const prompt = [
-    `「${companyName}」について、あなたの知識から以下の具体URLを推測してください。`,
-    "プレースホルダ({slug}等)を残さず、実在しそうな具体値に埋めてください。分からない項目は空行でOK。",
+    `「${companyName}」について、あなたの**確実な知識にある**URLのみを出してください。`,
+    "推測で適当なスラッグを作らないこと。確信が持てない項目は空行でOK。",
     "",
-    "1. 公式ウェブサイトのホームURL (例: https://example.co.jp/)",
-    "2. 公式サイトの採用ページ (例: https://example.co.jp/careers/ や /recruit/)",
-    "3. 公式サイトの会社概要ページ (例: https://example.co.jp/company/)",
-    "4. Talentio採用ページ (https://open.talentio.com/r/1/c/XXX/ 形式、XXX推測)",
-    "5. HRMOS採用ページ (https://hrmos.co/pages/XXX 形式、XXX推測)",
-    "6. Wantedly企業ページ (https://www.wantedly.com/companies/XXX 形式)",
+    "【出して欲しい項目（確信がある場合のみ）】",
+    "1. 公式ウェブサイトのホームURL (例: https://例の会社.co.jp/)",
+    "2. 公式サイトの採用/会社概要ページ (/careers /recruit /company など)",
+    "3. Talentio/HRMOS/Wantedly採用ページ（スラッグを確実に知っている場合のみ）",
     "",
-    "【除外】求人媒体:",
+    "【禁止】",
+    "- プレースホルダ({slug}等)を残す",
+    "- 会社名から推測した架空スラッグの出力（例: 『オリゾ』→『orizo』は確信があればOK、『g-i-t』のような根拠無しスラッグは禁止）",
+    "- 以下の求人媒体:",
     BLOCKED_SITES.map((s) => `  - ${s}`).join("\n"),
     "",
-    "出力: URLのみ1行ずつ、最大8件。説明・番号・記号なし。",
+    "出力: URLのみ1行ずつ、最大6件。説明・番号・記号なし。確信が無ければ空出力。",
   ].join("\n");
 
   try {
@@ -699,6 +725,32 @@ export async function POST(req: NextRequest) {
     if (contents.length === 0) {
       throw new Error(
         "採用ページのテキスト取得に失敗しました。URLを直接入力するか、別のページで試してください。"
+      );
+    }
+
+    // ---------- 他社ページ混入ガード ----------
+    // ユーザーがURLを直接指定した場合はそのURLは無条件に信頼（TOP1として残す）
+    // URL無しで会社名のみの場合、Jina本文に会社名トークンが含まれないページは他社ページとして除外
+    const nameTokens = companyNameTokens(companyName);
+    if (!companyUrl && nameTokens.length > 0) {
+      const before = contents.length;
+      const filtered = contents.filter((c) => {
+        const ok = textMentionsCompany(c.text, nameTokens);
+        if (!ok) console.log(`  × 他社疑い除外: ${c.url}`);
+        return ok;
+      });
+      if (filtered.length > 0) {
+        contents.length = 0;
+        contents.push(...filtered);
+        console.log(`[filter] 他社ページ除外: ${before}→${contents.length}件`);
+      } else {
+        console.log(`[filter] 全ソースが会社名不一致のため除外せず通過（要注意）`);
+      }
+    }
+
+    if (contents.length === 0) {
+      throw new Error(
+        `「${companyName}」の採用ページを特定できませんでした。会社名の表記を変えるか、採用ページURLを直接入力してください。`
       );
     }
 
