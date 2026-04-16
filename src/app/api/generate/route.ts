@@ -139,6 +139,48 @@ function sortByPriority(urls: string[]): string[] {
   });
 }
 
+// www./非www./末尾スラッシュ違いを正規化（同一ページのURL変種を束ねるため）
+function normalizeUrl(url: string): string {
+  return url.replace(/^https?:\/\/(www\.)?/i, "https://").toLowerCase().replace(/\/+$/, "");
+}
+function dedupeUrls(urls: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const u of urls) {
+    const n = normalizeUrl(u);
+    if (!seen.has(n)) {
+      seen.add(n);
+      out.push(u);
+    }
+  }
+  return out;
+}
+
+// 会社公式サイトのホーム(パス無し or "/")か判定
+function isCompanyHomepage(url: string): boolean {
+  try {
+    const p = new URL(url).pathname;
+    return p === "" || p === "/";
+  } catch {
+    return false;
+  }
+}
+
+// 優先度を考慮しつつホーム系URLも必ず枠を確保する取得対象選定
+// 優先1(ATS/求人詳細)から最大4、優先2(その他＝会社HP等)から最大4、合計max件までを返す
+function pickFetchCandidates(urls: string[], max: number): string[] {
+  const sorted = sortByPriority(urls);
+  const p1 = sorted.filter((u) => isJobDetailUrl(u) || isPreferredHost(u));
+  const p2 = sorted.filter((u) => !isJobDetailUrl(u) && !isPreferredHost(u));
+  const picked: string[] = [];
+  const pushUnique = (u: string) => { if (!picked.includes(u)) picked.push(u); };
+  // 会社HPのホームURLは最優先で枠確保（ATSへのリンクの入口になるため）
+  for (const u of p2) if (isCompanyHomepage(u)) pushUnique(u);
+  for (const u of p1.slice(0, 4)) pushUnique(u);
+  for (const u of p2.slice(0, 4)) pushUnique(u);
+  return picked.slice(0, max);
+}
+
 // URLとして有効な行を抽出（末尾の句読点は除去、スキーム無しは補完）
 function extractUrls(text: string): string[] {
   if (!text) return [];
@@ -304,9 +346,9 @@ async function findOfficialUrlWithGemini(
     })),
   ]);
 
-  const merged = Array.from(
+  const merged = dedupeUrls(Array.from(
     new Set([...groundRes.urls, ...guessRes.urls])
-  );
+  ));
   const sorted = sortByPriority(merged);
   console.log(
     `[search] grounded:${groundRes.urls.length} 推測:${guessRes.urls.length} → 統合${sorted.length}件`
@@ -699,13 +741,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // www/非www/末尾スラッシュ違いの変種を統合
+    targetUrls = dedupeUrls(targetUrls);
     // 優先度順にソート
     targetUrls = sortByPriority(targetUrls);
     console.log(`[search] ソート後URL:`, targetUrls);
 
-    // Step 2: Jina Reader で最大6件を並列取得
-    const fetchCandidates = targetUrls.slice(0, 6);
-    console.log(`[fetch] Jina Readerで並列取得: ${fetchCandidates.length}件`);
+    // Step 2: Jina Reader で優先度バランスを取って最大7件を並列取得
+    // ATS系(優先1)だけを拾うと homepages が落ちて Stage2 クロールの起点を失うため、
+    // 会社HP(優先2)も確実に枠確保
+    const fetchCandidates = pickFetchCandidates(targetUrls, 7);
+    console.log(`[fetch] Jina Readerで並列取得: ${fetchCandidates.length}件`, fetchCandidates);
     const contents: { url: string; text: string }[] = [];
     const MIN_TEXT_LEN = 150;
 
