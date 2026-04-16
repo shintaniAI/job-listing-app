@@ -208,13 +208,15 @@ async function detectPositionsWithGemini(
 
   const result = await withTimeout(
     ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      // 検出は軽いタスクなので最速モデル
+      model: "gemini-2.5-flash-lite",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
         temperature: 0,
         maxOutputTokens: 800,
-      },
+        thinkingConfig: { thinkingBudget: 0 },
+      } as any,
     }),
     8000,
     "Gemini(ポジション検出)"
@@ -229,64 +231,152 @@ async function detectPositionsWithGemini(
   }
 }
 
-const GENERATION_INSTRUCTION = `あなたは求人票作成の専門家です。与えられた「採用ページ全文テキスト」（複数ページの結合）から、talentio/wantedly レベルの詳細な求人票JSONを生成してください。
-
-【目標レベル】
-open.talentio.com などの詳細求人票と同等の情報密度。業務内容は10項目以上、福利厚生は15項目以上、会社情報は事業/MVV/カルチャー/代表メッセージを含む豊富な内容にする。
-
-【最重要】
+// 共通ルール（両パート共通）
+const COMMON_RULES = `【絶対ルール】
 - 原文に書かれている情報は**一切省略せず全て**JSONに反映する
 - 箇条書き項目は全て転記する（「など」で端折らない）
 - 数値・固有名詞・制度名は原文通りに転記する
-- 情報がない項目は値を "情報なし" にする（フロントで自動非表示にする）
-- 雛形にないキーは自由に追加してよい（例: "代表メッセージ", "選考フロー", "1日のスケジュール", "チーム構成", "技術スタック", "使用ツール", "評価制度"）
-- 業務内容・福利厚生は原文に出てくる全項目を**個別キーに分けて**列挙する
-- 複数ページのソースがある場合、全ページから情報を統合する
+- 情報がない項目は値を "情報なし" にする
+- 雛形にないキーは自由に追加してよい
+- 値は必ず「文字列」で返す（配列・ネストオブジェクト禁止）
+- 複数項目がある場合は個別キー（"主な業務内容1","主な業務内容2"...）に分ける
+- 推測・創作・要約禁止。原文にないことは書かない`;
 
-【JSON値のフォーマット規則 - 絶対厳守】
-- **各セクションの値は必ず「文字列」で返す**（配列・ネストオブジェクト禁止）
-- 複数項目がある場合は**個別のキーに分ける**（例: "主な業務内容1", "主な業務内容2", "主な業務内容3"...）
-- 箇条書きを1つのキーに入れる場合は改行区切りの文字列（"・項目1\\n・項目2\\n・項目3"）
-- 給与の内訳のような階層情報も、個別キーに展開する（例: "固定時間外手当", "固定深夜手当", "年俸月額"）
+// パートA: 企業全体情報 (basicInfo / companyInfo / holidays / benefits / summary)
+const PROMPT_COMPANY_PART = `あなたは求人票作成の専門家です。与えられた採用ページ全文から、**企業全体に関する情報**のみをJSONで出力してください。
 
-【項目数のミニマム（talentio水準）】
-- basicInfo: 5項目以上
-- companyInfo: **12項目以上**（事業内容1〜N / ミッション / ビジョン / バリュー / 特徴 / 強み / 設立 / 従業員数 / 資本金 / 本社 / 代表メッセージ / カルチャー）
-- jobContent: **業務内容10〜20項目**（"主な業務内容1"〜"主な業務内容N"）+ 業務の流れ / チーム構成 / 配属 / キャリアパス / 将来性 / 技術スタック / 使用ツール
-- requirements: 必須5項目 + 歓迎5項目 + 求める人物像 + 年齢 + 学歴（最低10項目）
-- salary: **10項目以上**（基本給 / 想定年収 / 年俸月額 / 固定時間外手当 / 固定深夜手当 / 昇給 / 賞与 / 諸手当1〜N / 給与モデル例 等）
-- workConditions: **10項目以上**（勤務地 / 住所 / アクセス / 勤務時間 / コアタイム / リモート可否 / 頻度 / 残業時間 / 試用期間 / 転勤 / 服装）
-- holidays: 7項目以上（年間休日数 / 週休 / 有給 / 特別休暇1〜N / 長期休暇 / 育児休暇 等）
-- benefits: **15項目以上**（社会保険 / 退職金 / 健康診断 / ジム / 食事 / 在宅手当 / 通勤 / 住宅 / 育児 / 介護 / スキル / 書籍 / 研修 / レクリエーション / 独自制度1〜N）
+${COMMON_RULES}
 
-【禁止事項】
-- 要約・言い換え
-- 推測・創作
-- 「詳細は面接時」だけで済ませる（原文にあれば必ず具体化）
-- 配列 [...] やネスト {...} を値に入れること
+【出力セクション & 最低項目数（talentio水準）】
+- summary: 2〜3文の求人概要
+- basicInfo: 5項目以上 (企業名/募集職種/雇用形態/募集人数/勤務開始日等)
+- companyInfo: **12項目以上** (事業内容1〜N/ミッション/ビジョン/バリュー/特徴/強み/設立/従業員数/資本金/本社/代表メッセージ/カルチャー)
+- holidays: 7項目以上 (年間休日数/週休/有給/特別休暇1〜N/長期休暇/育児休暇)
+- benefits: **15項目以上** (社会保険/退職金/健康/ジム/食事/在宅/通勤/住宅/育児/介護/スキル/書籍/研修/独自制度1〜N)
 
-【品質基準】
-- 1項目20〜300文字、具体的数値・固有名詞を含む
-- 年収・残業時間・年間休日は必ず数値で記載
-- MVV・事業内容・代表メッセージ・カルチャーも企業情報に含める
-- 複数ソースから得た情報は全て統合し、重複は1つにまとめる`;
-
-const JOB_SCHEMA_HINT = `
+【出力形式（JSONのみ）】
 {
-  "companyName": "企業名",
-  "jobTitle": "募集職種",
-  "summary": "求人の概要 (2-3文)",
-  "basicInfo": { "企業名":"", "募集職種":"", "雇用形態":"", "募集人数":"", "勤務開始日":"" },
-  "companyInfo": { "事業内容":"", "企業理念・ミッション":"", "企業の特徴・強み":"", "設立":"", "従業員数":"", "資本金":"", "本社所在地":"" },
-  "jobContent": { "主な業務内容1":"", "主な業務内容2":"", "主な業務内容3":"", "主な業務内容4":"", "主な業務内容5":"", "業務の流れ":"", "配属部署":"", "キャリアパス・昇進":"", "将来性・成長機会":"" },
-  "requirements": { "必須要件1":"", "必須要件2":"", "必須要件3":"", "歓迎要件1":"", "歓迎要件2":"", "歓迎要件3":"", "求める人物像":"", "年齢":"", "学歴":"" },
-  "salary": { "基本給":"", "想定年収":"", "給与内訳":"", "昇給":"", "賞与":"", "年収モデル例":"", "諸手当":"", "給与備考":"" },
-  "workConditions": { "勤務地":"", "勤務先住所":"", "最寄駅・アクセス":"", "勤務時間":"", "リモートワーク可否":"", "残業時間":"", "試用期間":"", "転勤可能性":"", "服装・ドレスコード":"" },
-  "holidays": { "年間休日数":"", "休日パターン":"", "有給休暇":"", "特別休暇":"", "長期休暇":"", "休暇制度の特徴":"" },
-  "benefits": { "社会保険":"", "退職金制度":"", "健康関連":"", "住宅関連":"", "育児・介護支援":"", "スキルアップ支援":"", "福利厚生施設":"", "その他福利厚生":"" }
+  "summary": "...",
+  "basicInfo": { "企業名":"", ... },
+  "companyInfo": { "事業内容1":"", "ミッション":"", ... },
+  "holidays": { "年間休日数":"", ... },
+  "benefits": { "社会保険":"", ... }
 }`;
 
-async function generateJobJsonWithGemini(
+// パートB: ポジション固有情報 (jobContent / requirements / salary / workConditions)
+const PROMPT_POSITION_PART = `あなたは求人票作成の専門家です。与えられた採用ページ全文から、**ポジションの業務/応募条件**に関する情報のみをJSONで出力してください。
+
+${COMMON_RULES}
+
+【出力セクション & 最低項目数（talentio水準）】
+- jobContent: **業務内容10〜20項目** ("主な業務内容1"〜"主な業務内容N") + 業務の流れ/チーム構成/配属/キャリアパス/将来性/技術スタック/使用ツール
+- requirements: 必須5項目 + 歓迎5項目 + 求める人物像 + 年齢 + 学歴（最低10項目）
+- salary: **10項目以上** (基本給/想定年収/年俸月額/固定時間外手当/固定深夜手当/昇給/賞与/諸手当1〜N/給与モデル例)
+- workConditions: **10項目以上** (勤務地/住所/アクセス/勤務時間/コアタイム/リモート/頻度/残業/試用期間/転勤/服装)
+
+【出力形式（JSONのみ）】
+{
+  "jobContent": { "主な業務内容1":"", ... },
+  "requirements": { "必須要件1":"", ... },
+  "salary": { "基本給":"", ... },
+  "workConditions": { "勤務地":"", ... }
+}`;
+
+async function generateCompanyPart(
+  ai: GoogleGenAI,
+  companyName: string,
+  sourceText: string
+): Promise<{ data: any; usage: any }> {
+  const prompt = [
+    PROMPT_COMPANY_PART,
+    "",
+    `会社名(ユーザー入力): ${companyName || "（未指定）"}`,
+    "",
+    "【採用ページ全文テキスト】",
+    sourceText,
+    "",
+    "上記から企業全体の情報だけをJSONで返してください。",
+  ].join("\n");
+
+  const result = await withTimeout(
+    ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        temperature: 0.2,
+        maxOutputTokens: 8000,
+        // thinkingを無効化して高速化
+        thinkingConfig: { thinkingBudget: 0 },
+      } as any,
+    }),
+    28000,
+    "Gemini(企業パート生成)"
+  );
+
+  const text = result.text || "";
+  let data: any;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    const m = text.match(/\{[\s\S]*\}/);
+    if (!m) throw new Error("企業パートのパース失敗");
+    data = JSON.parse(m[0]);
+  }
+  return { data, usage: (result as any).usageMetadata || {} };
+}
+
+async function generatePositionPart(
+  ai: GoogleGenAI,
+  companyName: string,
+  jobTitle: string,
+  salary: string,
+  sourceText: string,
+  focusHint?: string
+): Promise<{ data: any; usage: any }> {
+  const prompt = [
+    PROMPT_POSITION_PART,
+    "",
+    `会社名(ユーザー入力): ${companyName || "（未指定）"}`,
+    `職種(ユーザー入力): ${jobTitle || "（未指定）"}`,
+    `給与(ユーザー入力): ${salary || "（未指定）"}`,
+    focusHint ? `\n【重要】「${focusHint}」というポジション専用の情報に絞ってください。` : "",
+    "",
+    "【採用ページ全文テキスト】",
+    sourceText,
+    "",
+    "上記からポジション固有の情報だけをJSONで返してください。",
+  ].join("\n");
+
+  const result = await withTimeout(
+    ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        temperature: 0.2,
+        maxOutputTokens: 8000,
+        thinkingConfig: { thinkingBudget: 0 },
+      } as any,
+    }),
+    28000,
+    "Gemini(ポジションパート生成)"
+  );
+
+  const text = result.text || "";
+  let data: any;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    const m = text.match(/\{[\s\S]*\}/);
+    if (!m) throw new Error("ポジションパートのパース失敗");
+    data = JSON.parse(m[0]);
+  }
+  return { data, usage: (result as any).usageMetadata || {} };
+}
+
+// ２つのパートを並列実行して merge する（片方失敗しても片方は生きる）
+async function generateJobJsonSplit(
   ai: GoogleGenAI,
   companyName: string,
   jobTitle: string,
@@ -294,50 +384,43 @@ async function generateJobJsonWithGemini(
   sourceText: string,
   focusHint?: string
 ): Promise<{ jobData: any; usage: any }> {
-  const userPrompt = [
-    GENERATION_INSTRUCTION,
-    "",
-    "【最低限の雛形（キーは自由に追加・増やしてOK、雛形にないキーも歓迎）】",
-    JOB_SCHEMA_HINT,
-    "",
-    `会社名(ユーザー入力): ${companyName || "（未指定）"}`,
-    `職種(ユーザー入力): ${jobTitle || "（未指定）"}`,
-    `給与(ユーザー入力): ${salary || "（未指定）"}`,
-    focusHint
-      ? `\n【重要】本JSONは「${focusHint}」というポジション専用の求人票として生成してください。\n- jobContent, requirements, salary, workConditions はこのポジション固有の内容にする\n- companyInfo, holidays, benefits など会社全体の情報は共通で構わない`
-      : "",
-    "",
-    "【採用ページ全文テキスト】",
-    sourceText,
-    "",
-    "上記を忠実に反映したJSONだけを出力してください (前後の説明文・マークダウン不要)。",
-  ].join("\n");
+  const [companyRes, positionRes] = await Promise.allSettled([
+    generateCompanyPart(ai, companyName, sourceText),
+    generatePositionPart(ai, companyName, jobTitle, salary, sourceText, focusHint),
+  ]);
 
-  const result = await withTimeout(
-    ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: userPrompt,
-      config: {
-        responseMimeType: "application/json",
-        temperature: 0.2,
-        maxOutputTokens: 12000,
-      },
-    }),
-    30000,
-    "Gemini(求人票生成)"
-  );
+  const companyData = companyRes.status === "fulfilled" ? companyRes.value.data : {};
+  const positionData = positionRes.status === "fulfilled" ? positionRes.value.data : {};
 
-  const text = result.text || "";
-  let jobData: any;
-  try {
-    jobData = JSON.parse(text);
-  } catch {
-    const m = text.match(/\{[\s\S]*\}/);
-    if (!m) throw new Error("Geminiレスポンスをパースできませんでした");
-    jobData = JSON.parse(m[0]);
+  if (companyRes.status === "rejected" && positionRes.status === "rejected") {
+    throw new Error(
+      `生成失敗: 企業=${(companyRes.reason as any)?.message}, ポジション=${(positionRes.reason as any)?.message}`
+    );
   }
 
-  const usage = (result as any).usageMetadata || {};
+  const jobData = {
+    companyName: companyName || "",
+    jobTitle: jobTitle || "",
+    summary: companyData.summary || "",
+    basicInfo: companyData.basicInfo || {},
+    companyInfo: companyData.companyInfo || {},
+    jobContent: positionData.jobContent || {},
+    requirements: positionData.requirements || {},
+    salary: positionData.salary || {},
+    workConditions: positionData.workConditions || {},
+    holidays: companyData.holidays || {},
+    benefits: companyData.benefits || {},
+  };
+
+  const usage = {
+    promptTokenCount:
+      (companyRes.status === "fulfilled" ? companyRes.value.usage.promptTokenCount || 0 : 0) +
+      (positionRes.status === "fulfilled" ? positionRes.value.usage.promptTokenCount || 0 : 0),
+    candidatesTokenCount:
+      (companyRes.status === "fulfilled" ? companyRes.value.usage.candidatesTokenCount || 0 : 0) +
+      (positionRes.status === "fulfilled" ? positionRes.value.usage.candidatesTokenCount || 0 : 0),
+  };
+
   return { jobData, usage };
 }
 
@@ -421,12 +504,16 @@ export async function POST(req: NextRequest) {
     let merged = contents.map((c) => `=== ${c.url} ===\n${c.text}`).join("\n\n");
     if (merged.length > MAX_CHARS) merged = merged.slice(0, MAX_CHARS);
 
-    // Step 2.5 & 3: 複数ポジション検出 と プライマリ生成を並列実行（時間短縮）
+    // Step 2.5 & 3: 検出 と 2分割並列生成 を全て並列実行
+    // [detection, companyPart, positionPart] 3並列 → max(3コール)
     const primaryPositionCandidate = jobTitle || "";
-    console.log(`[parallel] positions検出 と primary生成を並列実行`);
+    console.log(`[parallel] 検出 + 企業パート + ポジションパート を3並列実行`);
     const [detectedPositions, primaryResult] = await Promise.all([
-      detectPositionsWithGemini(ai, merged).catch(() => []),
-      generateJobJsonWithGemini(
+      detectPositionsWithGemini(ai, merged).catch((e) => {
+        console.log(`[detect] 失敗: ${e.message}`);
+        return [] as string[];
+      }),
+      generateJobJsonSplit(
         ai,
         companyName,
         primaryPositionCandidate,

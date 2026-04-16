@@ -171,9 +171,10 @@ export async function POST(req: NextRequest) {
           responseMimeType: "application/json",
           temperature: 0.2,
           maxOutputTokens: 8000,
-        },
+          thinkingConfig: { thinkingBudget: 0 },
+        } as any,
       }),
-      45000,
+      35000,
       "Gemini(ポジション詳細生成)"
     );
 
