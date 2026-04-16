@@ -157,6 +157,97 @@ function isBlockedUrl(url: string): boolean {
   return BLOCKED_SITES.some((b) => lower.includes(b));
 }
 
+// カタカナ(と長音・促音)をヘボン式ローマ字に変換する簡易コンバータ
+// Geminiのカタカナ→ローマ字推測は不安定なので(オリゾ→gikou等)、プログラムで直接変換する。
+function katakanaToRomaji(text: string): string {
+  const map: Record<string, string> = {
+    ア:"a",イ:"i",ウ:"u",エ:"e",オ:"o",
+    カ:"ka",キ:"ki",ク:"ku",ケ:"ke",コ:"ko",
+    ガ:"ga",ギ:"gi",グ:"gu",ゲ:"ge",ゴ:"go",
+    サ:"sa",シ:"shi",ス:"su",セ:"se",ソ:"so",
+    ザ:"za",ジ:"ji",ズ:"zu",ゼ:"ze",ゾ:"zo",
+    タ:"ta",チ:"chi",ツ:"tsu",テ:"te",ト:"to",
+    ダ:"da",ヂ:"ji",ヅ:"zu",デ:"de",ド:"do",
+    ナ:"na",ニ:"ni",ヌ:"nu",ネ:"ne",ノ:"no",
+    ハ:"ha",ヒ:"hi",フ:"fu",ヘ:"he",ホ:"ho",
+    バ:"ba",ビ:"bi",ブ:"bu",ベ:"be",ボ:"bo",
+    パ:"pa",ピ:"pi",プ:"pu",ペ:"pe",ポ:"po",
+    マ:"ma",ミ:"mi",ム:"mu",メ:"me",モ:"mo",
+    ヤ:"ya",ユ:"yu",ヨ:"yo",
+    ラ:"ra",リ:"ri",ル:"ru",レ:"re",ロ:"ro",
+    ワ:"wa",ヲ:"wo",ン:"n",
+    ヴ:"vu",
+  };
+  // 小書き(拗音)は直前に連結して処理
+  const smallY: Record<string, string> = { ャ:"ya", ュ:"yu", ョ:"yo" };
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    const next = text[i + 1];
+    // 促音(ッ) → 次文字の子音を重ねる
+    if (c === "ッ" && next && map[next]) {
+      const r = map[next];
+      out += r[0];
+      continue;
+    }
+    // 長音(ー) → 前の母音を繰り返す
+    if (c === "ー" && out.length > 0) {
+      const last = out[out.length - 1];
+      if (/[aeiou]/.test(last)) out += last;
+      continue;
+    }
+    if (map[c] && smallY[next]) {
+      const r = map[c]; // 例: キ→"ki"
+      // きゃ→kya, しゃ→sha, ちゃ→cha
+      if (r.endsWith("i")) {
+        const stem = r.slice(0, -1);
+        out += stem + smallY[next];
+      } else {
+        out += r + smallY[next];
+      }
+      i++;
+      continue;
+    }
+    if (map[c]) {
+      out += map[c];
+      continue;
+    }
+    // その他(英数・記号等)はそのまま残す(後段で処理)
+    out += c;
+  }
+  return out;
+}
+
+// 会社名から、スラッグとして有効そうなローマ字候補を返す
+// 例: "株式会社オリゾ" → ["orizo"]、"株式会社 Luup" → ["luup"]
+function companyNameRomajiCandidates(companyName: string): string[] {
+  if (!companyName) return [];
+  const out = new Set<string>();
+  const stripped = companyName
+    .replace(/株式会社|有限会社|合同会社|合資会社|合名会社|一般社団法人|一般財団法人|公益社団法人|公益財団法人|学校法人|医療法人|社会福祉法人|特定非営利活動法人|ＮＰＯ法人|NPO法人/g, "")
+    .replace(/（株）|\(株\)|（有）|\(有\)/g, "")
+    .replace(/,?\s*(Inc|Corp|Corporation|Co\.?,?\s*Ltd\.?|Ltd\.?|LLC|K\.K\.)\.?/gi, "")
+    .trim();
+  // 既に半角英字主体ならそのまま小文字化
+  if (/^[A-Za-z0-9\-_\s]+$/.test(stripped)) {
+    out.add(stripped.toLowerCase().replace(/\s+/g, ""));
+  }
+  // カタカナ主体ならローマ字化
+  if (/[\u30A0-\u30FF]/.test(stripped)) {
+    const r = katakanaToRomaji(stripped).toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (r.length >= 2) out.add(r);
+  }
+  // スペースや中点で分割して各パートも候補に
+  for (const part of stripped.split(/[\s・／/]+/)) {
+    if (/^[A-Za-z0-9\-_]+$/.test(part)) out.add(part.toLowerCase());
+    else if (/[\u30A0-\u30FF]/.test(part)) {
+      const r = katakanaToRomaji(part).toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (r.length >= 2) out.add(r);
+    }
+  }
+  return [...out];
+}
+
 // 会社名から「株式会社」等の法人格修飾子を除去した核トークンを抽出
 function companyNameTokens(companyName: string): string[] {
   if (!companyName) return [];
@@ -373,6 +464,26 @@ function extractRecruitmentLinksFromContent(text: string): string[] {
   });
 }
 
+// プログラム生成: ローマ字スラッグ候補から HP/ATS の具体URLを機械的に組み立てる
+// Gemini のローマ字幻覚(オリゾ→gikou)を回避するため、カタカナ直変換した確実な候補を先に入れる。
+function buildDeterministicCandidateUrls(companyName: string): string[] {
+  const slugs = companyNameRomajiCandidates(companyName);
+  const out: string[] = [];
+  for (const s of slugs) {
+    if (s.length < 2) continue;
+    // HP (.co.jp / .com / .jp)
+    out.push(`https://${s}.co.jp/`);
+    out.push(`https://www.${s}.co.jp/`);
+    out.push(`https://${s}.com/`);
+    out.push(`https://${s}.jp/`);
+    // ATS
+    out.push(`https://open.talentio.com/r/1/c/${s}/`);
+    out.push(`https://hrmos.co/pages/${s}`);
+    out.push(`https://www.wantedly.com/companies/${s}`);
+  }
+  return out;
+}
+
 // フォールバック: Groundingを使わず知識ベースで具体URL推測（高速）
 // ATS URL (Talentio/HRMOS/Wantedly) はスラッグの幻覚を起こしやすい (オリゾ→gikou等) ため
 // ここでは HP 系のみ推測させ、ATS は grounded 側に任せる。
@@ -525,13 +636,33 @@ async function findOfficialUrlWithGemini(
     })),
   ]);
 
+  // プログラム生成候補: カタカナ→ローマ字で確実なスラッグを作る
+  const deterministicUrls = buildDeterministicCandidateUrls(companyName);
+
+  // ATS URL のスラッグ妥当性チェック: 会社名から生成したローマ字候補と一致するもののみ許可
+  // (gikou 等の hallucinated スラッグを弾く)
+  const slugCandidates = companyNameRomajiCandidates(companyName);
+  const isPlausibleAtsSlug = (url: string): boolean => {
+    const slug = extractAtsCompanySlug(url);
+    if (!slug) return true; // ATSじゃない or slug抽出失敗時は通す (別の検証でフィルタ)
+    if (slugCandidates.length === 0) return true; // 会社名がローマ字化できない → 判定保留
+    // 会社名のローマ字候補のいずれかを含む/含まれる、または完全一致
+    return slugCandidates.some((s) =>
+      slug === s || slug.includes(s) || s.includes(slug)
+    );
+  };
+
+  const filteredGrounded = groundRes.urls.filter((u) => !isKnownAtsHost(u) || isPlausibleAtsSlug(u));
+  const filteredGuess = guessRes.urls.filter((u) => !isKnownAtsHost(u) || isPlausibleAtsSlug(u));
+
   const merged = dedupeUrls(Array.from(
-    new Set([...groundRes.urls, ...guessRes.urls])
+    new Set([...filteredGrounded, ...filteredGuess, ...deterministicUrls])
   ));
   const sorted = sortByPriority(merged);
   console.log(
-    `[search] grounded:${groundRes.urls.length} 推測:${guessRes.urls.length} → 統合${sorted.length}件`
+    `[search] grounded:${groundRes.urls.length}(有効${filteredGrounded.length}) 推測:${guessRes.urls.length}(有効${filteredGuess.length}) 機械生成:${deterministicUrls.length} → 統合${sorted.length}件`
   );
+  console.log(`[search] ローマ字候補:`, slugCandidates);
 
   const usage = {
     promptTokenCount:
