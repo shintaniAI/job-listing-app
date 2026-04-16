@@ -113,23 +113,32 @@ async function fetchJinaReaderHtml(url: string, timeoutMs = 8000): Promise<strin
   }
 }
 
-// Talentio homes/XXX のHTML版からpages/XXXXX URLを抽出する
-// markdown版はSPAレンダリング済みテキストだけになるので data-link-url / publishedUrl は消えている
-async function extractPagesUrlsFromAtsHome(homeUrl: string, timeoutMs = 7000): Promise<string[]> {
+// Talentio の homes/XXX や /c/{slug}/ (ATS企業ルート) の HTML版から
+// 個別求人リンク (homes/XXX, pages/XXXXX 等) を抽出する。
+// markdown版はSPAレンダリング済みテキストだけになるので data-link-url / publishedUrl は消えている。
+async function extractAtsLinksFromPage(pageUrl: string, timeoutMs = 7000): Promise<string[]> {
   try {
-    const html = await fetchJinaReaderHtml(homeUrl, timeoutMs);
+    const html = await fetchJinaReaderHtml(pageUrl, timeoutMs);
     const out = new Set<string>();
+    // homes/XXX と pages/XXX の両方を拾う（ATSルートから homes→pages 多段で辿るため）
     const patterns = [
-      /data-link-url="([^"]*\/pages\/\d+[^"]*)"/g,
-      /"publishedUrl"\s*:\s*"([^"]*\/pages\/\d+[^"]*)"/g,
-      /href="([^"]*\/pages\/\d+[^"]*)"/g,
+      /data-link-url="([^"]*\/(?:pages|homes)\/\d+[^"]*)"/g,
+      /"publishedUrl"\s*:\s*"([^"]*\/(?:pages|homes)\/\d+[^"]*)"/g,
+      /href="([^"]*\/(?:pages|homes)\/\d+[^"]*)"/g,
+      /"url"\s*:\s*"([^"]*\/(?:pages|homes)\/\d+[^"]*)"/g,
     ];
     for (const re of patterns) {
       let m: RegExpExecArray | null;
       while ((m = re.exec(html))) {
-        const u = m[1].replace(/\\\//g, "/");
+        let u = m[1].replace(/\\\//g, "/");
+        // 相対URLは絶対化
+        if (u.startsWith("/")) {
+          try {
+            const base = new URL(pageUrl);
+            u = `${base.origin}${u}`;
+          } catch { continue; }
+        }
         if (/open\.talentio\.com|hrmos\.co/.test(u) && !isBlockedUrl(u)) {
-          // /apply などの付属パスは除外
           if (!/\/apply\/?$/.test(u) && !/\/form\/?$/.test(u)) out.add(u);
         }
       }
@@ -139,6 +148,9 @@ async function extractPagesUrlsFromAtsHome(homeUrl: string, timeoutMs = 7000): P
     return [];
   }
 }
+
+// 後方互換エイリアス
+const extractPagesUrlsFromAtsHome = extractAtsLinksFromPage;
 
 function isBlockedUrl(url: string): boolean {
   const lower = url.toLowerCase();
@@ -179,6 +191,45 @@ function isPreferredHost(url: string): boolean {
   return PREFERRED_HOSTS.some((h) => lower.includes(h));
 }
 
+// 既知の採用管理サービス(ATS)のホスト。/recruit/ 等のパス断片は含めない厳格判定。
+const KNOWN_ATS_HOSTS = [
+  "open.talentio.com",
+  "talentio.com",
+  "hrmos.co",
+  "herp.careers",
+  "wantedly.com",
+];
+function isKnownAtsHost(url: string): boolean {
+  try {
+    const h = new URL(url).host.toLowerCase();
+    return KNOWN_ATS_HOSTS.some((x) => h === x || h.endsWith("." + x) || h === "www." + x);
+  } catch {
+    return false;
+  }
+}
+
+// ATS企業ルート ( /homes/XXX や /pages/XXX を含まない ) URL か判定。
+// これらは Jina markdown ではSPA未描画となるため、HTML抽出でリンクを辿る必要がある。
+function isAtsCompanyRootUrl(url: string): boolean {
+  // Talentio: /r/{N}/c/{slug}/  (/homes, /pages 無し)
+  if (/^https?:\/\/open\.talentio\.com\/r\/[^/]+\/c\/[^/]+\/?$/i.test(url)) return true;
+  if (/^https?:\/\/open\.talentio\.com\/r\/[^/]+\/c\/[^/]+\/homes\/\d+\/?$/i.test(url)) return true;
+  // HRMOS: /pages/{slug}  (/jobs/NNN 無し)
+  if (/^https?:\/\/hrmos\.co\/pages\/[^/]+\/?$/i.test(url)) return true;
+  // Wantedly: /companies/{slug}  (/projects/NNN 無し)
+  if (/^https?:\/\/(www\.)?wantedly\.com\/companies\/[^/]+\/?$/i.test(url)) return true;
+  return false;
+}
+
+// ATSページ全般(ルート/一覧/詳細いずれも): HTML抽出で追加URLを発掘する価値がある
+function shouldHtmlExtractAts(url: string): boolean {
+  if (isBlockedUrl(url)) return false;
+  if (!isKnownAtsHost(url)) return false;
+  // pages/XXX 詳細ページからも関連求人リンクを拾えるが、ノイズも多いのでルート/homes のみ対象
+  if (isAtsCompanyRootUrl(url)) return true;
+  return false;
+}
+
 // URLを優先度でソート: 求人詳細 > 公式採用媒体 > その他
 function sortByPriority(urls: string[]): string[] {
   return [...urls].sort((a, b) => {
@@ -215,18 +266,23 @@ function isCompanyHomepage(url: string): boolean {
   }
 }
 
-// 優先度を考慮しつつホーム系URLも必ず枠を確保する取得対象選定
-// 優先1(ATS/求人詳細)から最大4、優先2(その他＝会社HP等)から最大4、合計max件までを返す
+// 優先度を考慮しつつホーム系URLも必ず枠を確保する取得対象選定。
+// 順序: (1) 求人詳細/ATS既知ホスト → (2) 会社HPのホームURL → (3) generic /recruit/ 等 → (4) 残り
+// 過去の事故: grounded search が「/recruit/」(404) ばかり返し、ATSルートが p1 4枠から溢れて失敗した。
 function pickFetchCandidates(urls: string[], max: number): string[] {
   const sorted = sortByPriority(urls);
-  const p1 = sorted.filter((u) => isJobDetailUrl(u) || isPreferredHost(u));
-  const p2 = sorted.filter((u) => !isJobDetailUrl(u) && !isPreferredHost(u));
+  const pAts = sorted.filter((u) => isJobDetailUrl(u) || isKnownAtsHost(u));
+  const pHome = sorted.filter((u) => !pAts.includes(u) && isCompanyHomepage(u));
+  const pOther = sorted.filter((u) => !pAts.includes(u) && !pHome.includes(u));
+
   const picked: string[] = [];
   const pushUnique = (u: string) => { if (!picked.includes(u)) picked.push(u); };
-  // 会社HPのホームURLは最優先で枠確保（ATSへのリンクの入口になるため）
-  for (const u of p2) if (isCompanyHomepage(u)) pushUnique(u);
-  for (const u of p1.slice(0, 4)) pushUnique(u);
-  for (const u of p2.slice(0, 4)) pushUnique(u);
+  // ATS/求人詳細は最優先で全部入れる（最大5件まで）
+  for (const u of pAts.slice(0, 5)) pushUnique(u);
+  // 会社HPのホームURLは必ず1件以上確保（ATSへのリンクの入口になるため）
+  for (const u of pHome.slice(0, 2)) pushUnique(u);
+  // それ以外（/recruit/ 等）は余り枠で
+  for (const u of pOther.slice(0, 3)) pushUnique(u);
   return picked.slice(0, max);
 }
 
@@ -423,15 +479,31 @@ async function findOfficialUrlWithGemini(
 // ---------- 複数ポジション検出 ----------
 async function detectPositionsWithGemini(
   ai: GoogleGenAI,
-  sourceText: string
+  sourceText: string,
+  hasRecruitmentSource: boolean = true
 ): Promise<string[]> {
   const prompt = [
-    "以下の採用ページテキストから、募集されている職種名を全て抽出してください。",
+    "以下の採用ページテキストから、**実際に募集されている職種名**を全て抽出してください。",
+    "",
+    "【必ず除外するもの（職種ではない）】",
+    "- 事業内容・事業領域・事業セグメント（例: 「広告事業」「美容医療支援事業」「クリエイティブ事業」）",
+    "- サービス名・製品名・ブランド名",
+    "- 業界名・分野名（例: 「IT業界」「マーケティング分野」）",
+    "- 会社の強み・特徴・コンセプト",
+    "- ミッション/ビジョン/バリュー関連の文言",
+    "",
+    "【職種として扱うもの】",
+    "- 採用ページで「募集職種」「Job」「採用情報」などに列挙されている具体的な仕事名",
+    "- 例: 「営業」「エンジニア」「デザイナー」「カスタマーサクセス」「一気通貫型ソリューション営業」など",
     "",
     "【ルール】",
     "- 同一ポジションの別名表記は統合（例: 「営業」と「ソリューション営業」が同一なら1つ）",
     "- 職種名は原文にあるものをそのまま使う",
     "- 該当が1つしか無い場合は1つだけ返す",
+    "- **自信が持てない場合は空配列 [] を返す** (事業内容を職種と誤認するくらいなら返さない方が良い)",
+    hasRecruitmentSource
+      ? "- ソースに採用ページ(ATS等)が含まれている前提で抽出する"
+      : "- **ソースは会社HPのみで採用ページ(ATS等)が含まれていない**。このため明確に募集職種と断定できるもの以外は返さない。事業名を職種と混同しないこと。",
     "- 最大10件",
     "",
     "【出力形式（JSONのみ）】",
@@ -840,13 +912,17 @@ export async function POST(req: NextRequest) {
     }
 
     // ---------- 他社ページ混入ガード ----------
-    // URL無しで会社名のみの場合、Jina本文に会社名トークンが含まれないページは他社ページとして除外
-    // 全ソースが会社名不一致なら他社データで誤生成する前にエラーで止める
+    // URL無しで会社名のみの場合、Jina本文に会社名トークンが含まれないページは他社ページとして除外。
+    // 例外: 既知ATSホストのURL (open.talentio.com/r/X/c/{slug}/ 等) はSPAで markdown が薄く
+    //       会社名を含まないことが多いが、URL自体が企業専用スラッグを持つので信頼する。
+    //       これをフィルタで落とすと正しい採用ページを取りこぼすことになる。
     const nameTokens = companyNameTokens(companyName);
     if (!companyUrl && nameTokens.length > 0) {
       const before = contents.length;
       const droppedUrls: string[] = [];
       const filtered = contents.filter((c) => {
+        // 既知ATSホストは会社名マッチを要求しない (URLで企業を特定できる)
+        if (isKnownAtsHost(c.url)) return true;
         const ok = textMentionsCompany(c.text, nameTokens);
         if (!ok) {
           droppedUrls.push(c.url);
@@ -868,10 +944,33 @@ export async function POST(req: NextRequest) {
       contents.push(...filtered);
     }
 
+    // ---------- Stage 1.5: Stage 1 で取得済みのATSルート/homesからHTML抽出 ----------
+    // grounded search がいきなり /c/orizo/ や /homes/XXX を返したケースで、
+    // そのページ自身のSPA描画を HTML 版 Jina で取り直してリンクを発掘する。
+    // Stage 2 は本文中のリンク抽出しかできないためSPA の場合ここで補う必要がある。
+    const stage1AtsHtmlPages: string[] = [];
+    {
+      const stage1Ats = contents.filter((c) => shouldHtmlExtractAts(c.url));
+      if (stage1Ats.length > 0) {
+        console.log(`[crawl] Stage1.5: ATS ${stage1Ats.length}件をHTML抽出`);
+        const results = await Promise.allSettled(
+          stage1Ats.map((c) => extractAtsLinksFromPage(c.url, 7000))
+        );
+        for (let i = 0; i < results.length; i++) {
+          const r = results[i];
+          if (r.status === "fulfilled") {
+            console.log(`  HTML抽出 ${stage1Ats[i].url} → ${r.value.length}件`);
+            for (const u of r.value) stage1AtsHtmlPages.push(u);
+          }
+        }
+      }
+    }
+
     // ---------- Stage 2: Stage1本文からATS/採用系リンクを抽出して追加取得 ----------
     // 例: orizo.co.jp の本文に [RECRUIT](https://open.talentio.com/r/1/c/orizo/homes/4235) があれば、
     // そこを辿って深い採用情報を取りに行く。会社HP→ATSの2段階クロールが必要なケースを救う。
     const crawlDebug: any = {
+      stage1HtmlExtracted: stage1AtsHtmlPages,
       stage2: { candidates: [] as string[], fetched: [] as any[], extracted: {} as any },
       stage3: { candidates: [] as string[], fetched: [] as any[] },
     };
@@ -885,22 +984,25 @@ export async function POST(req: NextRequest) {
           if (!alreadyFetched.has(u) && !discovered.has(u)) discovered.add(u);
         }
       }
+      // Stage1.5 の HTML 抽出で見つけた /homes/XXX, /pages/XXX も Stage2 候補に入れる
+      for (const u of stage1AtsHtmlPages) {
+        if (!alreadyFetched.has(u) && !discovered.has(u)) discovered.add(u);
+      }
+      crawlDebug.stage2.extracted["__stage1_html__"] = stage1AtsHtmlPages;
       const stage2Candidates = sortByPriority([...discovered]).slice(0, 4);
       crawlDebug.stage2.candidates = stage2Candidates;
       if (stage2Candidates.length > 0) {
         console.log(`[crawl] Stage2: Stage1本文から${stage2Candidates.length}件の追加URLを発見`);
         console.log(`[crawl] Stage2対象:`, stage2Candidates);
 
-        // ATS homes ページ (Talentio /homes/XXX) は SPA のため markdown には pages/XXX リンクが無い。
-        // 並行してHTML版を取得し data-link-url / publishedUrl から個別求人URLを抽出する。
-        const isAtsHomeUrl = (u: string) => /open\.talentio\.com\/r\/[^/]+\/c\/[^/]+\/homes\/\d+/i.test(u);
-
+        // ATS homes/ルートページは SPA のため markdown には個別求人リンクが無い。
+        // 並行して HTML 版も取得し data-link-url / publishedUrl から抽出する。
         const stage2Results = await Promise.allSettled(
           stage2Candidates.map(async (url) => {
-            if (isAtsHomeUrl(url)) {
+            if (shouldHtmlExtractAts(url)) {
               const [text, pagesUrls] = await Promise.all([
                 fetchJinaReader(url, 8000),
-                extractPagesUrlsFromAtsHome(url, 7000),
+                extractAtsLinksFromPage(url, 7000),
               ]);
               return { url, text, pagesUrls };
             }
@@ -912,8 +1014,9 @@ export async function POST(req: NextRequest) {
         const htmlDiscoveredPages: string[] = [];
         for (const r of stage2Results) {
           if (r.status === "fulfilled" && r.value.text && r.value.text.length > MIN_TEXT_LEN) {
-            // 会社名が含まれるページだけ採用
-            if (nameTokens.length === 0 || textMentionsCompany(r.value.text, nameTokens)) {
+            // 既知ATSホストは URL で企業特定できるため会社名マッチ不要（Stage 1 と同ポリシー）
+            const trustByAtsHost = isKnownAtsHost(r.value.url);
+            if (trustByAtsHost || nameTokens.length === 0 || textMentionsCompany(r.value.text, nameTokens)) {
               contents.push({ url: r.value.url, text: r.value.text });
               crawlDebug.stage2.fetched.push({ url: r.value.url, len: r.value.text.length, status: "ok", htmlPages: r.value.pagesUrls.length });
               console.log(`  ✓ Stage2 ${r.value.url} (${r.value.text.length}文字, HTML抽出pages:${r.value.pagesUrls.length}件)`);
@@ -1021,9 +1124,14 @@ export async function POST(req: NextRequest) {
 
     // Step 3: 検出 + 2分割並列生成
     const primaryPositionCandidate = jobTitle || "";
-    console.log(`[parallel] 検出 + 企業パート + ポジションパート を3並列実行`);
+    // 事業セグメントを職種と誤認するのを防ぐため、ソースに採用ページ(ATS/求人詳細)が
+    // 含まれているかどうかをポジション検出プロンプトに伝える
+    const hasRecruitmentSource = contents.some(
+      (c) => isJobDetailUrl(c.url) || isKnownAtsHost(c.url)
+    );
+    console.log(`[parallel] 検出 + 企業パート + ポジションパート を3並列実行 (recruitment source: ${hasRecruitmentSource})`);
     const [detectedPositions, primaryResult] = await Promise.all([
-      detectPositionsWithGemini(ai, merged).catch((e) => {
+      detectPositionsWithGemini(ai, merged, hasRecruitmentSource).catch((e) => {
         console.log(`[detect] 失敗: ${e.message}`);
         return [] as string[];
       }),
