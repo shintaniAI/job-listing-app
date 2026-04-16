@@ -1503,8 +1503,8 @@ export async function POST(req: NextRequest) {
       // Stage1.5 の HTML 抽出で見つけた /homes/XXX, /pages/XXX も Stage2 候補に入れる
       for (const u of stage1AtsHtmlPages) addIfUsable(u);
       crawlDebug.stage2.extracted["__stage1_html__"] = stage1AtsHtmlPages;
-      // 最大12件に拡大: 複数ポジションを持つ企業のために個別職種ページまで取り込む余地を確保
-      const stage2Candidates = sortByPriority([...discovered]).slice(0, 12);
+      // 最大10件: 職種別ページ6-8 + workplace/about 等のハブ2-3 で網羅可能
+      const stage2Candidates = sortByPriority([...discovered]).slice(0, 10);
       crawlDebug.stage2.candidates = stage2Candidates;
       if (stage2Candidates.length > 0) {
         console.log(`[crawl] Stage2: Stage1本文から${stage2Candidates.length}件の追加URLを発見`);
@@ -1579,29 +1579,19 @@ export async function POST(req: NextRequest) {
             stage3Discovered.add(u);
           }
         }
-        // 最大6件、sortByPriority で /workplace/ /benefit/ /salary/ 系を優先
-        // Jinaレート制限対策で 8→6 に縮小＋3件ずつ2バッチに分割（間に500ms待機）
-        const stage3Candidates = sortByPriority([...stage3Discovered]).slice(0, 6);
+        // 最大4件、sortByPriority で /workplace/ /benefit/ /salary/ 系を最優先
+        // 本当に求人票に必要なのは 給与/福利厚生/働き方/勤務地 の4つ。onboarding等は優先度低。
+        const stage3Candidates = sortByPriority([...stage3Discovered]).slice(0, 4);
         crawlDebug.stage3.candidates = stage3Candidates;
         if (stage3Candidates.length > 0) {
           console.log(`[crawl] Stage3: ハブ配下URL ${stage3Candidates.length}件`);
           console.log(`[crawl] Stage3対象:`, stage3Candidates);
-          // バッチ化: Jina 429 バースト回避 (Stage2 12件 + Stage3 8件を一気に並列すると必ず刺さる)
-          const BATCH = 3;
-          const stage3Results: PromiseSettledResult<{ url: string; text: string }>[] = [];
-          for (let i = 0; i < stage3Candidates.length; i += BATCH) {
-            const batch = stage3Candidates.slice(i, i + BATCH);
-            const batchResults = await Promise.allSettled(
-              batch.map((url) =>
-                fetchJinaReader(url, 9000).then((text) => ({ url, text }))
-              )
-            );
-            stage3Results.push(...batchResults);
-            // 最終バッチでなければ500ms待機
-            if (i + BATCH < stage3Candidates.length) {
-              await new Promise((r) => setTimeout(r, 500));
-            }
-          }
+          // Jina 429 対策: 4件並列で十分 (Stage2終了後で前のバーストと重ならない)
+          const stage3Results = await Promise.allSettled(
+            stage3Candidates.map((url) =>
+              fetchJinaReader(url, 9000).then((text) => ({ url, text }))
+            )
+          );
           for (const r of stage3Results) {
             if (r.status === "fulfilled" && r.value.text && r.value.text.length > MIN_TEXT_LEN) {
               if (nameTokens.length === 0 || textMentionsCompany(r.value.text, nameTokens)) {
