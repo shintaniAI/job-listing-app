@@ -1,14 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import OpenAI from "openai";
+import { GoogleGenAI } from "@google/genai";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
-
-function getOpenAI() {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("OPENAI_API_KEY が設定されていません");
-  return new OpenAI({ apiKey });
-}
 
 // 求人媒体（参照禁止リスト）
 const BLOCKED_SITES = [
@@ -22,215 +16,177 @@ const BLOCKED_SITES = [
   "townwork.net",
 ];
 
-function buildResearchPrompt(
-  companyName: string,
-  companyUrl: string,
-  jobTitle: string
-): string {
-  const blocked = BLOCKED_SITES.map((s) => `  - ${s}`).join("\n");
+function getGenAI() {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("GEMINI_API_KEY が設定されていません");
+  return new GoogleGenAI({ apiKey });
+}
 
-  if (companyUrl) {
-    return [
-      "以下のURLにアクセスして、ページに書かれている採用・求人情報を一切省略せず全文抽出してください。",
-      "",
-      `対象URL: ${companyUrl}`,
-      companyName ? `企業名: ${companyName}` : "",
-      jobTitle ? `注目職種: ${jobTitle}` : "",
-      "",
-      "【絶対厳守】以下の求人媒体サイトは一切参照しないでください。上記URLと企業公式ページのみを情報源としてください：",
-      blocked,
-      "",
-      "【抽出してほしい情報（全て原文のまま詳細に・要約禁止）】",
-      "- 企業情報: ミッション・ビジョン・バリュー、代表メッセージ、事業内容（全事業・全サービス）、設立年月、従業員数、資本金、本社所在地、拠点",
-      "- カルチャー・社風・働く環境・社員の特徴",
-      "- 募集職種・雇用形態・試用期間（期間中の条件変化含む）",
-      "- 仕事内容（業務内容を箇条書きで**全て**列挙。業務の流れ、一日のスケジュール例、担当領域、裁量範囲なども含む）",
-      "- 配属部署・チーム構成・上司・メンバー",
-      "- キャリアパス・昇進・昇格の仕組み",
-      "- 応募資格（必須条件・歓迎条件・求める人物像・年齢・学歴）",
-      "- 給与・年収: 月額・年収レンジ・固定残業代（時間と金額）・想定モデル年収",
-      "- 昇給（頻度）・賞与（頻度と実績）",
-      "- 勤務地・住所・最寄り駅（徒歩分数まで）・リモート/サテライト選択の有無",
-      "- 勤務時間・フレックス・コアタイム・標準労働時間",
-      "- 残業時間（月平均・実績値）",
-      "- 休日・休暇（完全週休2日制の詳細・年間休日数・有給・特別休暇・慶弔休暇・誕生日休暇など全種類）",
-      "- 福利厚生: 健康関連、食事関連、住宅関連、育児介護、スキルアップ支援、社員旅行、レクリエーション、その他独自制度**すべて**",
-      "- 社会保険（健康保険・厚生年金・雇用保険・労災）",
-      "- 選考フロー・面接回数・選考期間",
-      "",
-      "【禁止事項】",
-      "- 要約・箇条書きの省略・言い換え",
-      "- 「〜など」で情報を端折る（全項目を書き出す）",
-      "- 創作・推測（書かれていない情報の補完）",
-      "",
-      "取得した情報は原文の密度・語彙をそのまま保持し、箇条書き項目は全て転記してください。数値・固有名詞・制度名は原文通りに。",
-    ].join("\n");
+// ---------- Jina Reader: URLからMarkdown全文取得 ----------
+async function fetchJinaReader(url: string): Promise<string> {
+  const target = `https://r.jina.ai/${url}`;
+  const res = await fetch(target, {
+    method: "GET",
+    headers: {
+      Accept: "text/plain",
+      "X-Return-Format": "markdown",
+    },
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    throw new Error(`Jina Reader取得失敗: ${res.status} ${res.statusText}`);
   }
+  const text = await res.text();
+  return text;
+}
 
-  // URL未指定の場合：公式採用プラットフォームを指定検索
-  return [
-    `「${companyName}」の公式採用情報を以下の手順で調査してください。`,
-    jobTitle ? `特に「${jobTitle}」職種の情報を優先的に収集してください。` : "",
+function isBlockedUrl(url: string): boolean {
+  return BLOCKED_SITES.some((b) => url.includes(b));
+}
+
+// ---------- Gemini + Google Search で公式採用URLを探す ----------
+async function findOfficialUrlWithGemini(
+  ai: GoogleGenAI,
+  companyName: string,
+  jobTitle: string
+): Promise<{ urls: string[]; usage: any }> {
+  const prompt = [
+    `「${companyName}」の公式採用ページURLを見つけてください。`,
+    jobTitle ? `職種: ${jobTitle}` : "",
     "",
-    "【検索クエリ（この順番で試してください）】",
+    "【検索優先順位】",
     `1. site:open.talentio.com "${companyName}"`,
     `2. site:talentio.com "${companyName}"`,
     `3. site:wantedly.com "${companyName}"`,
     `4. site:hrmos.co "${companyName}"`,
     `5. "${companyName}" 採用サイト`,
     "",
-    "【絶対厳守】以下の求人媒体サイトは検索結果に出てきても無視し、絶対に参照しないでください：",
-    blocked,
+    "【絶対禁止】以下の求人媒体は無視してください:",
+    BLOCKED_SITES.map((s) => `  - ${s}`).join("\n"),
     "",
-    "企業公式サイトや採用プラットフォーム（Talentio・Wantedly・HRMOS等）のページのみにアクセスしてください。",
-    "",
-    "【アクセスしたページから全て抽出してほしい情報】",
-    "- 企業情報: ミッション・ビジョン・バリュー、事業内容、設立年、従業員数、資本金、本社所在地",
-    "- 募集職種・雇用形態・試用期間",
-    "- 仕事内容（業務内容を箇条書きで、できるだけ多く）",
-    "- 応募資格（必須条件・歓迎条件・求める人物像）",
-    "- 給与・年収（具体的な数値: 月額・年収・固定残業代等）",
-    "- 昇給・賞与",
-    "- 勤務地・住所・最寄り駅",
-    "- 勤務時間・フレックス・コアタイム",
-    "- 残業時間（月平均）",
-    "- 休日・休暇（年間休日数・有給・特別休暇等）",
-    "- 福利厚生（全項目）",
-    "- 社会保険",
-    "- リモートワーク・テレワーク制度",
-    "",
-    "取得した情報は要約・省略せず、原文に近い形でそのまま出力してください。数値は必ず具体的に記載してください。",
-  ].join("\n");
-}
+    "見つけたURLを **URLだけ1行ずつ**、複数候補 (最大5件) を出力してください。説明文・番号・マークダウンは不要。",
+  ]
+    .filter(Boolean)
+    .join("\n");
 
-function extractSources(research: any): string[] {
-  const sources: string[] = [];
+  const result = await ai.models.generateContent({
+    model: "gemini-2.5-flash",
+    contents: prompt,
+    config: {
+      tools: [{ googleSearch: {} }],
+      temperature: 0,
+    },
+  });
+
+  const text = result.text || "";
+  const urls = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => /^https?:\/\//.test(l))
+    .filter((l) => !isBlockedUrl(l));
+
+  // grounding metadata からも取る
+  const grounded: string[] = [];
   try {
-    for (const item of research.output || []) {
-      if (item.type === "message") {
-        for (const content of item.content || []) {
-          if (content.type === "output_text") {
-            for (const annotation of content.annotations || []) {
-              if (annotation.type === "url_citation" && annotation.url) {
-                const isBlocked = BLOCKED_SITES.some((blocked) =>
-                  annotation.url.includes(blocked)
-                );
-                if (!isBlocked && !sources.includes(annotation.url)) {
-                  sources.push(annotation.url);
-                }
-              }
-            }
-          }
-        }
+    const candidates: any[] = (result as any).candidates || [];
+    for (const c of candidates) {
+      const chunks = c?.groundingMetadata?.groundingChunks || [];
+      for (const ch of chunks) {
+        const u = ch?.web?.uri;
+        if (u && /^https?:\/\//.test(u) && !isBlockedUrl(u)) grounded.push(u);
       }
     }
   } catch {}
-  return sources;
+
+  const merged = Array.from(new Set([...urls, ...grounded]));
+  const usage = (result as any).usageMetadata || {};
+  return { urls: merged.slice(0, 5), usage };
 }
 
-const GENERATION_SYSTEM_PROMPT = `あなたは求人票作成の専門家です。企業の公式採用ページから収集した情報を基に、採用ページと同等レベルに充実した求人票を作成してください。
+// ---------- 収集情報を8セクションJSONに整形 ----------
+const GENERATION_INSTRUCTION = `あなたは求人票作成の専門家です。与えられた「採用ページ全文テキスト」から、採用ホームページと同等の情報密度で求人票JSONを生成してください。
 
-【最重要】採用ホームページに書かれている情報は**一切省略せず全て**求人票に反映してください。箇条書きは全項目を残し、数値・固有名詞は原文通りに転記してください。
+【最重要】
+- 原文に書かれている情報は**一切省略せず全て**JSONに反映する
+- 箇条書き項目は全て転記する（「など」で端折らない）
+- 数値・固有名詞・制度名は原文通りに転記する
+- 情報がない項目は値を "情報なし" にする（フロントで自動非表示にする）
+- 雛形にないキーは自由に追加してよい（例: "代表メッセージ", "選考フロー", "1日のスケジュール", "一日の流れ"）
+- 業務内容・福利厚生は原文に出てくる全項目を列挙する（雛形の5個に縛られず、10個20個でもOK）
 
-【必須要件】
-- 出力は必ず8つのセクションに分ける（基本情報、企業情報、仕事内容、応募資格、給与・報酬、勤務条件、休日・休暇、福利厚生・待遇）
-- 下記JSON形式はあくまで**最低限の雛形**。収集情報にあれば**追加キーを自由に追加して良い**（例: "海外出張", "部署規模", "選考フロー", "面接回数", "代表メッセージ" など）
-- 各業務内容・福利厚生項目は**収集情報に出てくる全項目**を列挙する（5個で足りなければ10個でも20個でもOK）
-- 「詳細は面接時」「要相談」のみの曖昧な記載は避け、具体的な数値・固有名詞・制度名を必ず記載する
-- 企業のMVV・事業内容・代表メッセージ・カルチャー・働く環境なども積極的に含める
+【禁止事項】
+- 要約・言い換え
+- 推測・創作
+- 「詳細は面接時」だけで済ませる（原文にあれば必ず具体化）
 
-【出力JSON形式】
+【品質基準】
+- 1項目20〜300文字、具体的数値・固有名詞を含む
+- 年収・残業時間・年間休日は必ず数値で記載
+- MVV・事業内容・代表メッセージ・カルチャーも企業情報に含める`;
+
+const JOB_SCHEMA_HINT = `
 {
   "companyName": "企業名",
   "jobTitle": "募集職種",
-  "summary": "求人の概要（2-3文）",
-  "basicInfo": {
-    "企業名": "",
-    "募集職種": "",
-    "雇用形態": "",
-    "募集人数": "",
-    "勤務開始日": ""
-  },
-  "companyInfo": {
-    "事業内容": "",
-    "企業理念・ミッション": "",
-    "企業の特徴・強み": "",
-    "設立": "",
-    "従業員数": "",
-    "資本金": "",
-    "本社所在地": ""
-  },
-  "jobContent": {
-    "主な業務内容1": "",
-    "主な業務内容2": "",
-    "主な業務内容3": "",
-    "主な業務内容4": "",
-    "主な業務内容5": "",
-    "業務の流れ": "",
-    "配属部署": "",
-    "キャリアパス・昇進": "",
-    "将来性・成長機会": ""
-  },
-  "requirements": {
-    "必須要件1": "",
-    "必須要件2": "",
-    "必須要件3": "",
-    "歓迎要件1": "",
-    "歓迎要件2": "",
-    "歓迎要件3": "",
-    "求める人物像": "",
-    "年齢": "",
-    "学歴": ""
-  },
-  "salary": {
-    "基本給": "",
-    "想定年収": "",
-    "給与内訳": "",
-    "昇給": "",
-    "賞与": "",
-    "年収モデル例": "",
-    "諸手当": "",
-    "給与備考": ""
-  },
-  "workConditions": {
-    "勤務地": "",
-    "勤務先住所": "",
-    "最寄駅・アクセス": "",
-    "勤務時間": "",
-    "リモートワーク可否": "",
-    "残業時間": "",
-    "試用期間": "",
-    "転勤可能性": "",
-    "服装・ドレスコード": ""
-  },
-  "holidays": {
-    "年間休日数": "",
-    "休日パターン": "",
-    "有給休暇": "",
-    "特別休暇": "",
-    "長期休暇": "",
-    "休暇制度の特徴": ""
-  },
-  "benefits": {
-    "社会保険": "",
-    "退職金制度": "",
-    "健康関連": "",
-    "住宅関連": "",
-    "育児・介護支援": "",
-    "スキルアップ支援": "",
-    "福利厚生施設": "",
-    "その他福利厚生": ""
+  "summary": "求人の概要 (2-3文)",
+  "basicInfo": { "企業名":"", "募集職種":"", "雇用形態":"", "募集人数":"", "勤務開始日":"" },
+  "companyInfo": { "事業内容":"", "企業理念・ミッション":"", "企業の特徴・強み":"", "設立":"", "従業員数":"", "資本金":"", "本社所在地":"" },
+  "jobContent": { "主な業務内容1":"", "主な業務内容2":"", "主な業務内容3":"", "主な業務内容4":"", "主な業務内容5":"", "業務の流れ":"", "配属部署":"", "キャリアパス・昇進":"", "将来性・成長機会":"" },
+  "requirements": { "必須要件1":"", "必須要件2":"", "必須要件3":"", "歓迎要件1":"", "歓迎要件2":"", "歓迎要件3":"", "求める人物像":"", "年齢":"", "学歴":"" },
+  "salary": { "基本給":"", "想定年収":"", "給与内訳":"", "昇給":"", "賞与":"", "年収モデル例":"", "諸手当":"", "給与備考":"" },
+  "workConditions": { "勤務地":"", "勤務先住所":"", "最寄駅・アクセス":"", "勤務時間":"", "リモートワーク可否":"", "残業時間":"", "試用期間":"", "転勤可能性":"", "服装・ドレスコード":"" },
+  "holidays": { "年間休日数":"", "休日パターン":"", "有給休暇":"", "特別休暇":"", "長期休暇":"", "休暇制度の特徴":"" },
+  "benefits": { "社会保険":"", "退職金制度":"", "健康関連":"", "住宅関連":"", "育児・介護支援":"", "スキルアップ支援":"", "福利厚生施設":"", "その他福利厚生":"" }
+}`;
+
+async function generateJobJsonWithGemini(
+  ai: GoogleGenAI,
+  companyName: string,
+  jobTitle: string,
+  salary: string,
+  sourceText: string
+): Promise<{ jobData: any; usage: any }> {
+  const userPrompt = [
+    GENERATION_INSTRUCTION,
+    "",
+    "【最低限の雛形（キーは自由に追加・増やしてOK、雛形にないキーも歓迎）】",
+    JOB_SCHEMA_HINT,
+    "",
+    `会社名(ユーザー入力): ${companyName || "（未指定）"}`,
+    `職種(ユーザー入力): ${jobTitle || "（未指定）"}`,
+    `給与(ユーザー入力): ${salary || "（未指定）"}`,
+    "",
+    "【採用ページ全文テキスト】",
+    sourceText,
+    "",
+    "上記を忠実に反映したJSONだけを出力してください (前後の説明文・マークダウン不要)。",
+  ].join("\n");
+
+  const result = await ai.models.generateContent({
+    model: "gemini-2.5-flash",
+    contents: userPrompt,
+    config: {
+      responseMimeType: "application/json",
+      temperature: 0.2,
+      maxOutputTokens: 16000,
+    },
+  });
+
+  const text = result.text || "";
+  let jobData: any;
+  try {
+    jobData = JSON.parse(text);
+  } catch {
+    const m = text.match(/\{[\s\S]*\}/);
+    if (!m) throw new Error("Geminiレスポンスをパースできませんでした");
+    jobData = JSON.parse(m[0]);
   }
+
+  const usage = (result as any).usageMetadata || {};
+  return { jobData, usage };
 }
 
-【品質基準】
-- 外部ソースに記載されている情報は**漏れなく**活用する（要約NG、原文に近い密度で転記）
-- 情報がない項目は "情報なし" という文字列を値に入れる（空文字列ではなく "情報なし"）。フロント側でPDF生成時に自動で非表示にする
-- 具体的な数値がある場合は必ず記載する（年収400万～840万円、年間休日120日、残業月平均20時間など）
-- MVV（ミッション・ビジョン・バリュー）は企業情報セクションに含める
-- 業務内容・福利厚生は収集情報に出てくる**全項目**を列挙する（雛形の個数に縛られない）
-- 文字数は1項目あたり20〜300文字を目安に、固有名詞や具体例を含めて記述する`;
-
+// ---------- メイン ----------
 export async function POST(req: NextRequest) {
   let body: any;
   try {
@@ -238,106 +194,153 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ error: "リクエストボディが不正なJSONです" }, { status: 400 });
   }
-
   if (!body || typeof body !== "object") {
     return NextResponse.json({ error: "リクエストボディが不正です" }, { status: 400 });
   }
 
   const cap = (v: any, n = 500) => (typeof v === "string" ? v.slice(0, n) : "");
+  const companyName: string = cap(body.companyName).trim();
+  const companyUrl: string = cap(body.companyUrl, 2000).trim();
+  const jobTitle: string = cap(body.jobTitle).trim();
+  const salary: string = cap(body.salary).trim();
+
+  const startedAt = Date.now();
 
   try {
-    const openai = getOpenAI();
-    const companyName: string = cap(body.companyName).trim();
-    const companyUrl: string = cap(body.companyUrl, 2000).trim();
-    const jobTitle: string = cap(body.jobTitle).trim();
-    const salary: string = cap(body.salary).trim();
+    const ai = getGenAI();
 
-    // Step 1: 公式採用ページを web_search でリサーチ
-    console.log(`リサーチ開始 | URL: ${companyUrl || "なし"} | 会社名: ${companyName}`);
-    const researchPrompt = buildResearchPrompt(companyName, companyUrl, jobTitle);
+    // Step 1: 対象URLを確定
+    let targetUrls: string[] = [];
+    let searchUsage: any = null;
 
-    const research = await openai.responses.create({
-      model: "gpt-4o",
-      tools: [{ type: "web_search", search_context_size: "high" } as any],
-      input: researchPrompt,
-    });
-
-    const context = research.output_text || "";
-    const sources = extractSources(research);
-
-    console.log(`リサーチ完了: ${context.length}文字, ソース${sources.length}件`);
-    console.log("参照ソース:", sources);
-
-    if (!context || context.length < 200) {
-      throw new Error(
-        "企業情報の収集に失敗しました。\n採用ページのURLを直接入力すると精度が上がります（例: https://open.talentio.com/...）"
+    if (companyUrl && /^https?:\/\//.test(companyUrl)) {
+      if (isBlockedUrl(companyUrl)) {
+        return NextResponse.json(
+          { error: `指定URLは求人媒体のため利用できません: ${companyUrl}` },
+          { status: 400 }
+        );
+      }
+      targetUrls = [companyUrl];
+    } else if (companyName) {
+      console.log(`[search] Gemini+Search で公式URL探索: ${companyName}`);
+      const r = await findOfficialUrlWithGemini(ai, companyName, jobTitle);
+      targetUrls = r.urls;
+      searchUsage = r.usage;
+      if (targetUrls.length === 0) {
+        throw new Error(
+          "公式採用ページのURLが見つかりませんでした。採用ページURLを直接入力してください。"
+        );
+      }
+      console.log(`[search] 候補URL: ${targetUrls.length}件`, targetUrls);
+    } else {
+      return NextResponse.json(
+        { error: "会社名または採用ページURLを入力してください" },
+        { status: 400 }
       );
     }
 
-    // Step 2: 収集情報をもとに構造化された求人票を生成
-    console.log("求人票を生成中...");
-    const userPrompt = [
-      "以下の収集情報から求人票を生成してください。",
-      "",
-      `会社名: ${companyName || "（未指定）"}`,
-      `職種: ${jobTitle || "（未指定）"}`,
-      `給与: ${salary || "（未指定）"}`,
-      "",
-      "【収集した企業・求人情報（公式採用ページより）】",
-      context,
-      "",
-      "注意: 上記の情報を最大限活用し、8セクション構成で詳細な求人票を生成してください。",
-    ].join("\n");
+    // Step 2: Jina Reader で全文Markdown取得（複数URLを結合）
+    console.log(`[fetch] Jina Readerで取得: ${targetUrls.length}件`);
+    const contents: { url: string; text: string }[] = [];
+    for (const url of targetUrls.slice(0, 3)) {
+      try {
+        const text = await fetchJinaReader(url);
+        if (text && text.length > 200) {
+          contents.push({ url, text });
+          console.log(`  ✓ ${url} (${text.length}文字)`);
+        } else {
+          console.log(`  ✗ ${url} (短すぎ: ${text?.length || 0}文字)`);
+        }
+      } catch (e: any) {
+        console.log(`  ✗ ${url}: ${e.message}`);
+      }
+      if (contents.length >= 2) break;
+    }
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o",
-      messages: [
-        { role: "system", content: GENERATION_SYSTEM_PROMPT },
-        { role: "user", content: userPrompt },
-      ],
-      response_format: { type: "json_object" },
-      temperature: 0.2,
-      max_tokens: 8000,
-    });
+    if (contents.length === 0) {
+      throw new Error(
+        "採用ページのテキスト取得に失敗しました。URLを直接入力するか、別のページで試してください。"
+      );
+    }
 
-    const content = completion.choices[0]?.message?.content;
-    if (!content) throw new Error("AI応答が空です");
+    const MAX_CHARS = 60000;
+    let merged = contents.map((c) => `=== ${c.url} ===\n${c.text}`).join("\n\n");
+    if (merged.length > MAX_CHARS) merged = merged.slice(0, MAX_CHARS);
 
-    const jobData = JSON.parse(content);
+    // Step 3: Gemini で 8セクションJSON生成
+    console.log(`[format] Geminiで整形 (入力${merged.length}文字)`);
+    const { jobData, usage: formatUsage } = await generateJobJsonWithGemini(
+      ai,
+      companyName,
+      jobTitle,
+      salary,
+      merged
+    );
 
-    // ユーザー入力値で上書き
+    // ユーザー入力で上書き
     if (companyName) jobData.companyName = companyName;
     if (jobTitle) jobData.jobTitle = jobTitle;
     jobData.companyName = jobData.companyName || "";
     jobData.jobTitle = jobData.jobTitle || "";
-
     if (salary) {
       jobData.salary = jobData.salary || {};
       jobData.salary["基本給"] = salary;
     }
 
-    // セクションの正規化
     const requiredSections = [
-      "basicInfo", "companyInfo", "jobContent", "requirements",
-      "salary", "workConditions", "holidays", "benefits",
+      "basicInfo",
+      "companyInfo",
+      "jobContent",
+      "requirements",
+      "salary",
+      "workConditions",
+      "holidays",
+      "benefits",
     ];
-    for (const section of requiredSections) {
-      if (
-        !jobData[section] ||
-        typeof jobData[section] !== "object" ||
-        Array.isArray(jobData[section])
-      ) {
-        jobData[section] = {};
+    for (const s of requiredSections) {
+      if (!jobData[s] || typeof jobData[s] !== "object" || Array.isArray(jobData[s])) {
+        jobData[s] = {};
       }
     }
 
-    jobData.sources = sources.length > 0
-      ? sources
-      : [`${companyName} 公式採用ページ（Web検索）`];
+    jobData.sources = contents.map((c) => c.url);
 
-    console.log("求人票生成完了");
+    // コスト算出 (Gemini 2.5 Flash 料金 / 2025年時点)
+    // input: $0.30 / 1M tokens, output: $2.50 / 1M tokens
+    // Google Search Grounding: $35 / 1000 request (無料枠500/日)
+    const totalInputTokens =
+      (searchUsage?.promptTokenCount || 0) + (formatUsage?.promptTokenCount || 0);
+    const totalOutputTokens =
+      (searchUsage?.candidatesTokenCount || 0) +
+      (formatUsage?.candidatesTokenCount || 0);
+    const inputCostUSD = (totalInputTokens / 1_000_000) * 0.3;
+    const outputCostUSD = (totalOutputTokens / 1_000_000) * 2.5;
+    const searchCostUSD = searchUsage ? 35 / 1000 : 0; // URL探索した場合のみ
+    const totalUSD = inputCostUSD + outputCostUSD + searchCostUSD;
+    const usdToJpy = 155;
+
+    jobData._meta = {
+      engine: "jina-reader + gemini-2.5-flash",
+      elapsed_ms: Date.now() - startedAt,
+      source_chars: merged.length,
+      source_count: contents.length,
+      tokens: {
+        input: totalInputTokens,
+        output: totalOutputTokens,
+      },
+      cost: {
+        input_usd: +inputCostUSD.toFixed(6),
+        output_usd: +outputCostUSD.toFixed(6),
+        search_usd: +searchCostUSD.toFixed(6),
+        total_usd: +totalUSD.toFixed(6),
+        total_jpy_approx: +(totalUSD * usdToJpy).toFixed(3),
+      },
+    };
+
+    console.log(
+      `[done] ${Date.now() - startedAt}ms | $${totalUSD.toFixed(4)} (${(totalUSD * usdToJpy).toFixed(2)}円) | in:${totalInputTokens} out:${totalOutputTokens}`
+    );
     return NextResponse.json(jobData);
-
   } catch (err: any) {
     console.error("Generate error:", err);
     return NextResponse.json(
