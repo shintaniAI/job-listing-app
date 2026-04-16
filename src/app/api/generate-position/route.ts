@@ -24,6 +24,19 @@ function getGenAI() {
   return new GoogleGenAI({ apiKey });
 }
 
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label}タイムアウト(${ms}ms)`)), ms);
+    p.then((v) => {
+      clearTimeout(t);
+      resolve(v);
+    }).catch((e) => {
+      clearTimeout(t);
+      reject(e);
+    });
+  });
+}
+
 function isBlockedUrl(url: string): boolean {
   return BLOCKED_SITES.some((b) => url.includes(b));
 }
@@ -150,15 +163,19 @@ export async function POST(req: NextRequest) {
       "上記からこのポジション固有の情報のみを JSON で返してください。",
     ].join("\n");
 
-    const result = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        temperature: 0.2,
-        maxOutputTokens: 8000,
-      },
-    });
+    const result = await withTimeout(
+      ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          temperature: 0.2,
+          maxOutputTokens: 8000,
+        },
+      }),
+      45000,
+      "Gemini(ポジション詳細生成)"
+    );
 
     let parsed: any;
     try {

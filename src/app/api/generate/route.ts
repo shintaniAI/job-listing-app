@@ -25,6 +25,20 @@ function getGenAI() {
   return new GoogleGenAI({ apiKey });
 }
 
+// Gemini呼び出し全体にタイムアウトを被せる (ハング時はエラーで返す)
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label}タイムアウト(${ms}ms)`)), ms);
+    p.then((v) => {
+      clearTimeout(t);
+      resolve(v);
+    }).catch((e) => {
+      clearTimeout(t);
+      reject(e);
+    });
+  });
+}
+
 // ---------- Jina Reader: URLからMarkdown全文取得 ----------
 async function fetchJinaReader(url: string, timeoutMs = 20000): Promise<string> {
   const target = `https://r.jina.ai/${url}`;
@@ -82,14 +96,18 @@ async function findOfficialUrlWithGemini(
     .filter(Boolean)
     .join("\n");
 
-  const result = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
-    contents: prompt,
-    config: {
-      tools: [{ googleSearch: {} }],
-      temperature: 0,
-    },
-  });
+  const result = await withTimeout(
+    ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: prompt,
+      config: {
+        tools: [{ googleSearch: {} }],
+        temperature: 0,
+      },
+    }),
+    20000,
+    "Gemini(URL検索)"
+  );
 
   const text = result.text || "";
   const urls = text
@@ -138,15 +156,19 @@ async function detectPositionsWithGemini(
     sourceText.slice(0, 30000),
   ].join("\n");
 
-  const result = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
-    contents: prompt,
-    config: {
-      responseMimeType: "application/json",
-      temperature: 0,
-      maxOutputTokens: 1000,
-    },
-  });
+  const result = await withTimeout(
+    ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        temperature: 0,
+        maxOutputTokens: 1000,
+      },
+    }),
+    15000,
+    "Gemini(ポジション検出)"
+  );
 
   try {
     const parsed = JSON.parse(result.text || "{}");
@@ -235,15 +257,19 @@ async function generateJobJsonWithGemini(
     "上記を忠実に反映したJSONだけを出力してください (前後の説明文・マークダウン不要)。",
   ].join("\n");
 
-  const result = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
-    contents: userPrompt,
-    config: {
-      responseMimeType: "application/json",
-      temperature: 0.2,
-      maxOutputTokens: 16000,
-    },
-  });
+  const result = await withTimeout(
+    ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: userPrompt,
+      config: {
+        responseMimeType: "application/json",
+        temperature: 0.2,
+        maxOutputTokens: 16000,
+      },
+    }),
+    45000,
+    "Gemini(求人票生成)"
+  );
 
   const text = result.text || "";
   let jobData: any;
