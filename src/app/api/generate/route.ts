@@ -105,7 +105,7 @@ async function findOfficialUrlWithGemini(
         temperature: 0,
       },
     }),
-    20000,
+    15000,
     "Gemini(URL検索)"
   );
 
@@ -153,7 +153,7 @@ async function detectPositionsWithGemini(
     '{"positions": ["職種1", "職種2", ...]}',
     "",
     "【採用ページ全文】",
-    sourceText.slice(0, 30000),
+    sourceText.slice(0, 15000),
   ].join("\n");
 
   const result = await withTimeout(
@@ -163,10 +163,10 @@ async function detectPositionsWithGemini(
       config: {
         responseMimeType: "application/json",
         temperature: 0,
-        maxOutputTokens: 1000,
+        maxOutputTokens: 800,
       },
     }),
-    15000,
+    8000,
     "Gemini(ポジション検出)"
   );
 
@@ -264,10 +264,10 @@ async function generateJobJsonWithGemini(
       config: {
         responseMimeType: "application/json",
         temperature: 0.2,
-        maxOutputTokens: 16000,
+        maxOutputTokens: 10000,
       },
     }),
-    45000,
+    35000,
     "Gemini(求人票生成)"
   );
 
@@ -338,22 +338,22 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Step 2: Jina Reader で全文Markdown取得（複数URLを結合）
-    console.log(`[fetch] Jina Readerで取得: ${targetUrls.length}件`);
+    // Step 2: Jina Reader で全文Markdown取得（1件取れたら即終了で時短）
+    console.log(`[fetch] Jina Readerで取得: 候補${targetUrls.length}件`);
     const contents: { url: string; text: string }[] = [];
     for (const url of targetUrls.slice(0, 3)) {
       try {
-        const text = await fetchJinaReader(url);
+        const text = await fetchJinaReader(url, 12000);
         if (text && text.length > 200) {
           contents.push({ url, text });
           console.log(`  ✓ ${url} (${text.length}文字)`);
+          break; // 1件成功したら十分。複数URLはタイムアウトの原因になるため切る
         } else {
           console.log(`  ✗ ${url} (短すぎ: ${text?.length || 0}文字)`);
         }
       } catch (e: any) {
         console.log(`  ✗ ${url}: ${e.message}`);
       }
-      if (contents.length >= 2) break;
     }
 
     if (contents.length === 0) {
@@ -362,7 +362,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const MAX_CHARS = 60000;
+    // Gemini入力は35000文字まで（60秒制限内に収める）
+    const MAX_CHARS = 35000;
     let merged = contents.map((c) => `=== ${c.url} ===\n${c.text}`).join("\n\n");
     if (merged.length > MAX_CHARS) merged = merged.slice(0, MAX_CHARS);
 
