@@ -730,29 +730,32 @@ export async function POST(req: NextRequest) {
     }
 
     // ---------- 他社ページ混入ガード ----------
-    // ユーザーがURLを直接指定した場合はそのURLは無条件に信頼（TOP1として残す）
     // URL無しで会社名のみの場合、Jina本文に会社名トークンが含まれないページは他社ページとして除外
+    // 全ソースが会社名不一致なら他社データで誤生成する前にエラーで止める
     const nameTokens = companyNameTokens(companyName);
     if (!companyUrl && nameTokens.length > 0) {
       const before = contents.length;
+      const droppedUrls: string[] = [];
       const filtered = contents.filter((c) => {
         const ok = textMentionsCompany(c.text, nameTokens);
-        if (!ok) console.log(`  × 他社疑い除外: ${c.url}`);
+        if (!ok) {
+          droppedUrls.push(c.url);
+          console.log(`  × 他社疑い除外: ${c.url}`);
+        }
         return ok;
       });
-      if (filtered.length > 0) {
-        contents.length = 0;
-        contents.push(...filtered);
-        console.log(`[filter] 他社ページ除外: ${before}→${contents.length}件`);
-      } else {
-        console.log(`[filter] 全ソースが会社名不一致のため除外せず通過（要注意）`);
+      console.log(`[filter] 他社ページ除外: ${before}→${filtered.length}件`);
+      if (filtered.length === 0) {
+        return NextResponse.json(
+          {
+            error: `「${companyName}」の採用ページを特定できませんでした。取得したページは全て別会社のものと判定されました。採用ページURLを直接入力してください。`,
+            _diag: { droppedUrls, nameTokens },
+          },
+          { status: 404 }
+        );
       }
-    }
-
-    if (contents.length === 0) {
-      throw new Error(
-        `「${companyName}」の採用ページを特定できませんでした。会社名の表記を変えるか、採用ページURLを直接入力してください。`
-      );
+      contents.length = 0;
+      contents.push(...filtered);
     }
 
     // ---------- content-aware ランキング & 予算配分 ----------
