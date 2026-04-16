@@ -47,6 +47,9 @@ const JOB_DETAIL_PATTERNS = [
   // 末尾が /index 以外のパスセグメントまたは .html で終わるもの
   /\/(recruit|careers?|saiyou?|hiring|jobs?)\/(job|position|occupation|role)\/[a-z0-9-]+/i,
   /\/(recruit|careers?)\/[a-z0-9-]+\.html?$/i,
+  // ネスト型の個別求人ページ: /recruit/entry/career/product-engineer.html (Cybozuパターン) 等
+  // entry/ 配下に career/newgrad/potential/midcareer 等のカテゴリを挟むケース
+  /\/(recruit|careers?)\/entry\/(career|newgrad|newgraduate|midcareer|potential|internship|parttime)\/[a-z0-9-]+\.html?$/i,
 ];
 
 function getGenAI() {
@@ -523,8 +526,12 @@ function isUselessAtsUrl(url: string): boolean {
     const host = u.host.toLowerCase();
     const p = u.pathname;
     // ATS外でも共通で 404 / エラーページは除外 (Jinaで取得しても中身が無いor混乱する)
-    if (/\/(404|not-?found|error|privacy-policy|privacy|terms|official-rules|sitemap|entry\/?$)/i.test(p)) return true;
+    // NOTE: /entry/ は会社HPでは「募集要項ページ」のことが多い (Cybozuの /recruit/entry/ 等)
+    //       ATS上の /entry/ (応募フォーム) だけは除外したいので、ATS時のみブロックする
+    if (/\/(404|not-?found|error|privacy-policy|privacy|terms|official-rules|sitemap)/i.test(p)) return true;
     if (!isKnownAtsHost(url)) return false;
+    // 以下は ATS ホスト限定のフィルタ (会社HP はここに来ない)
+    if (/\/entry\/?$/i.test(p)) return true;
     // ルート or パス無し
     if (p === "" || p === "/") return true;
     // 会社非依存のサブドメイン (例: atsguide.hrmos.co)
