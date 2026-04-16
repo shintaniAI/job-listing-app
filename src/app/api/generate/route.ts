@@ -91,6 +91,55 @@ async function fetchJinaReader(url: string, timeoutMs = 20000): Promise<string> 
   }
 }
 
+// Jina Reader: HTMLフォーマットで取得（SPAで描画されるリンク/属性を拾う用。本文取得には使わない）
+async function fetchJinaReaderHtml(url: string, timeoutMs = 8000): Promise<string> {
+  const target = `https://r.jina.ai/${url}`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(target, {
+      method: "GET",
+      headers: {
+        Accept: "text/html",
+        "X-Return-Format": "html",
+      },
+      cache: "no-store",
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`Jina(html)取得失敗: ${res.status}`);
+    return await res.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Talentio homes/XXX のHTML版からpages/XXXXX URLを抽出する
+// markdown版はSPAレンダリング済みテキストだけになるので data-link-url / publishedUrl は消えている
+async function extractPagesUrlsFromAtsHome(homeUrl: string, timeoutMs = 7000): Promise<string[]> {
+  try {
+    const html = await fetchJinaReaderHtml(homeUrl, timeoutMs);
+    const out = new Set<string>();
+    const patterns = [
+      /data-link-url="([^"]*\/pages\/\d+[^"]*)"/g,
+      /"publishedUrl"\s*:\s*"([^"]*\/pages\/\d+[^"]*)"/g,
+      /href="([^"]*\/pages\/\d+[^"]*)"/g,
+    ];
+    for (const re of patterns) {
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(html))) {
+        const u = m[1].replace(/\\\//g, "/");
+        if (/open\.talentio\.com|hrmos\.co/.test(u) && !isBlockedUrl(u)) {
+          // /apply などの付属パスは除外
+          if (!/\/apply\/?$/.test(u) && !/\/form\/?$/.test(u)) out.add(u);
+        }
+      }
+    }
+    return [...out];
+  } catch {
+    return [];
+  }
+}
+
 function isBlockedUrl(url: string): boolean {
   const lower = url.toLowerCase();
   return BLOCKED_SITES.some((b) => lower.includes(b));
@@ -841,18 +890,34 @@ export async function POST(req: NextRequest) {
       if (stage2Candidates.length > 0) {
         console.log(`[crawl] Stage2: Stage1本文から${stage2Candidates.length}件の追加URLを発見`);
         console.log(`[crawl] Stage2対象:`, stage2Candidates);
+
+        // ATS homes ページ (Talentio /homes/XXX) は SPA のため markdown には pages/XXX リンクが無い。
+        // 並行してHTML版を取得し data-link-url / publishedUrl から個別求人URLを抽出する。
+        const isAtsHomeUrl = (u: string) => /open\.talentio\.com\/r\/[^/]+\/c\/[^/]+\/homes\/\d+/i.test(u);
+
         const stage2Results = await Promise.allSettled(
-          stage2Candidates.map((url) =>
-            fetchJinaReader(url, 8000).then((text) => ({ url, text }))
-          )
+          stage2Candidates.map(async (url) => {
+            if (isAtsHomeUrl(url)) {
+              const [text, pagesUrls] = await Promise.all([
+                fetchJinaReader(url, 8000),
+                extractPagesUrlsFromAtsHome(url, 7000),
+              ]);
+              return { url, text, pagesUrls };
+            }
+            const text = await fetchJinaReader(url, 8000);
+            return { url, text, pagesUrls: [] as string[] };
+          })
         );
+
+        const htmlDiscoveredPages: string[] = [];
         for (const r of stage2Results) {
           if (r.status === "fulfilled" && r.value.text && r.value.text.length > MIN_TEXT_LEN) {
             // 会社名が含まれるページだけ採用
             if (nameTokens.length === 0 || textMentionsCompany(r.value.text, nameTokens)) {
-              contents.push(r.value);
-              crawlDebug.stage2.fetched.push({ url: r.value.url, len: r.value.text.length, status: "ok" });
-              console.log(`  ✓ Stage2 ${r.value.url} (${r.value.text.length}文字)`);
+              contents.push({ url: r.value.url, text: r.value.text });
+              crawlDebug.stage2.fetched.push({ url: r.value.url, len: r.value.text.length, status: "ok", htmlPages: r.value.pagesUrls.length });
+              console.log(`  ✓ Stage2 ${r.value.url} (${r.value.text.length}文字, HTML抽出pages:${r.value.pagesUrls.length}件)`);
+              for (const u of r.value.pagesUrls) htmlDiscoveredPages.push(u);
             } else {
               crawlDebug.stage2.fetched.push({ url: r.value.url, len: r.value.text.length, status: "filtered-offtopic" });
               console.log(`  × Stage2 除外(会社名不一致): ${r.value.url}`);
@@ -865,26 +930,30 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // Stage 2でATS homes/会社TOPを取得できた場合、さらにそこから個別求人ページ(pages/XXX)を辿る
-        // 例: talentio の homes/4235 → pages/118392 の個別求人詳細
+        // Stage 3: 個別求人詳細ページ(pages/XXXXX)を取得
+        // ソース: (a) Stage2本文(markdown)から抽出したisJobDetailUrl (b) HTML抽出で得たpages URL
         const stage2Added = contents.filter((c) => stage2Candidates.includes(c.url));
         const stage3Discovered = new Set<string>();
         for (const c of stage2Added) {
           for (const u of extractRecruitmentLinksFromContent(c.text)) {
-            if (!alreadyFetched.has(u) && !stage2Candidates.includes(u) && !stage3Discovered.has(u)) {
-              // 個別求人詳細URLだけを対象（ここで絞らないとページ一覧で無限に増える）
-              if (isJobDetailUrl(u)) stage3Discovered.add(u);
+            if (!alreadyFetched.has(u) && !stage2Candidates.includes(u) && isJobDetailUrl(u)) {
+              stage3Discovered.add(u);
             }
           }
         }
-        const stage3Candidates = [...stage3Discovered].slice(0, 2);
+        for (const u of htmlDiscoveredPages) {
+          if (!alreadyFetched.has(u) && !stage2Candidates.includes(u) && isJobDetailUrl(u)) {
+            stage3Discovered.add(u);
+          }
+        }
+        const stage3Candidates = [...stage3Discovered].slice(0, 3);
         crawlDebug.stage3.candidates = stage3Candidates;
         if (stage3Candidates.length > 0) {
           console.log(`[crawl] Stage3: 個別求人詳細URL ${stage3Candidates.length}件`);
           console.log(`[crawl] Stage3対象:`, stage3Candidates);
           const stage3Results = await Promise.allSettled(
             stage3Candidates.map((url) =>
-              fetchJinaReader(url, 6000).then((text) => ({ url, text }))
+              fetchJinaReader(url, 7000).then((text) => ({ url, text }))
             )
           );
           for (const r of stage3Results) {
