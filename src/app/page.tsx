@@ -256,7 +256,7 @@ export default function Home() {
             ${Object.entries(s.rows)
               .map(
                 ([k, v]) =>
-                  `<tr><th>${esc(k)}</th><td>${esc(v || "—")}</td></tr>`
+                  `<tr><th>${esc(k)}</th><td>${esc(v || "")}</td></tr>`
               )
               .join("")}
           </tbody>
@@ -270,27 +270,22 @@ export default function Home() {
     )}</title><style>
       @page { size: A4; margin: 14mm; }
       * { box-sizing: border-box; }
-      body { font-family: "Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic","Meiryo","Noto Sans JP",system-ui,sans-serif; color:#222; font-size:12px; line-height:1.65; margin:0; padding:24px; }
+      body { font-family: "Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic","Meiryo","Noto Sans JP",system-ui,sans-serif; color:#222; font-size:12px; line-height:1.8; letter-spacing:0.02em; margin:0; padding:24px; }
       .header { background:#1e40af; color:#fff; padding:16px 20px; border-radius:6px; margin-bottom:20px; }
-      .header h1 { font-size:20px; margin:0 0 4px; }
-      .header p { font-size:12px; margin:0; opacity:0.92; }
+      .header h1 { font-size:20px; margin:0 0 4px; line-height:1.5; }
+      .header p { font-size:12px; margin:0; opacity:0.92; line-height:1.7; }
       .section { margin-bottom:18px; page-break-inside: avoid; }
-      .section h2 { font-size:13px; color:#1e40af; border-bottom:2px solid #1e40af; padding-bottom:4px; margin:0 0 8px; }
+      .section h2 { font-size:13px; color:#1e40af; border-bottom:2px solid #1e40af; padding-bottom:4px; margin:0 0 8px; line-height:1.6; }
       table { width:100%; border-collapse:collapse; }
-      th, td { padding:8px 10px; font-size:11px; vertical-align:top; border-bottom:1px solid #e5e7eb; }
+      th, td { padding:12px 14px; font-size:11px; line-height:1.75; vertical-align:middle; border:1px solid #e5e7eb; }
       th { width:26%; background:#f3f4f6; color:#4b5563; font-weight:700; text-align:left; }
-      td { white-space:pre-wrap; }
-      .footer { margin-top:24px; text-align:center; font-size:9px; color:#9ca3af; }
-      @media print { body { padding:0; } }
+      td { white-space:pre-wrap; word-break:break-word; }
     </style></head><body>
       <div class="header">
         <h1>${esc(title)}</h1>
         ${result.summary ? `<p>${esc(result.summary)}</p>` : ""}
       </div>
       ${sectionsHtml}
-      <div class="footer">
-        <p>生成日: ${new Date().toLocaleDateString('ja-JP')} | 求人票自動生成システム v2.0</p>
-      </div>
       <script>
         window.addEventListener('load', function(){
           setTimeout(function(){ window.focus(); window.print(); }, 200);
@@ -563,17 +558,15 @@ const PrintLayout = React.forwardRef<HTMLDivElement, { data: JobData }>(function
         color: "#222",
         fontFamily: '"Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", "Noto Sans JP", system-ui, sans-serif',
         fontSize: "11px",
-        lineHeight: 1.5,
+        lineHeight: 1.8,
+        letterSpacing: "0.02em",
         boxSizing: "border-box",
       }}
     >
       {/* ヘッダー */}
       <div style={{ background: "#1e40af", color: "#fff", padding: "20px 24px", borderRadius: 6, marginBottom: 24 }}>
-        <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 6 }}>{title}</div>
-        {data.summary ? <div style={{ fontSize: 13, opacity: 0.92, lineHeight: 1.4 }}>{data.summary}</div> : null}
-        <div style={{ fontSize: 9, opacity: 0.7, marginTop: 8 }}>
-          生成日: {new Date().toLocaleDateString('ja-JP')} | 求人票自動生成システム v2.0
-        </div>
+        <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 6, lineHeight: 1.5 }}>{title}</div>
+        {data.summary ? <div style={{ fontSize: 13, opacity: 0.92, lineHeight: 1.7 }}>{data.summary}</div> : null}
       </div>
 
       {/* セクション */}
@@ -587,6 +580,7 @@ const PrintLayout = React.forwardRef<HTMLDivElement, { data: JobData }>(function
               borderBottom: "2px solid #1e40af",
               paddingBottom: 6,
               marginBottom: 10,
+              lineHeight: 1.6,
             }}
           >
             {s.title}
@@ -594,32 +588,35 @@ const PrintLayout = React.forwardRef<HTMLDivElement, { data: JobData }>(function
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <tbody>
               {Object.entries(s.rows).map(([k, v]) => (
-                <tr key={k} style={{ borderBottom: "1px solid #e5e7eb" }}>
+                <tr key={k}>
                   <td
                     style={{
                       width: "28%",
                       background: "#f9fafb",
-                      padding: "10px 12px",
+                      padding: "14px 14px",
                       fontWeight: 600,
                       fontSize: 10,
                       color: "#374151",
-                      verticalAlign: "top",
+                      verticalAlign: "middle",
                       border: "1px solid #e5e7eb",
+                      lineHeight: 1.7,
+                      wordBreak: "break-word",
                     }}
                   >
                     {k}
                   </td>
                   <td
                     style={{
-                      padding: "10px 12px",
+                      padding: "14px 14px",
                       fontSize: 10,
-                      verticalAlign: "top",
+                      verticalAlign: "middle",
                       whiteSpace: "pre-wrap",
                       border: "1px solid #e5e7eb",
-                      lineHeight: 1.4,
+                      lineHeight: 1.8,
+                      wordBreak: "break-word",
                     }}
                   >
-                    {v || "情報なし"}
+                    {v || ""}
                   </td>
                 </tr>
               ))}
