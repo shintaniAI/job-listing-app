@@ -637,6 +637,7 @@ export async function POST(req: NextRequest) {
     // Step 1: 対象URLを確定
     let targetUrls: string[] = [];
     let searchUsage: any = null;
+    let searchDebug: any = null;
 
     if (companyUrl && /^https?:\/\//.test(companyUrl)) {
       if (isBlockedUrl(companyUrl)) {
@@ -655,6 +656,7 @@ export async function POST(req: NextRequest) {
         try {
           const more = await findOfficialUrlWithGemini(ai, companyName, jobTitle);
           searchUsage = more.usage;
+          searchDebug = (more as any).debug || null;
           for (const u of more.urls) {
             if (!targetUrls.includes(u)) targetUrls.push(u);
           }
@@ -667,11 +669,12 @@ export async function POST(req: NextRequest) {
       const r = await findOfficialUrlWithGemini(ai, companyName, jobTitle);
       targetUrls = r.urls;
       searchUsage = r.usage;
+      searchDebug = (r as any).debug || null;
       if (targetUrls.length === 0) {
         return NextResponse.json(
           {
             error: "公式採用ページのURLが見つかりませんでした。採用ページURLを直接入力してください。",
-            _diag: (r as any).debug || null,
+            _diag: searchDebug,
           },
           { status: 500 }
         );
@@ -749,7 +752,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json(
           {
             error: `「${companyName}」の採用ページを特定できませんでした。取得したページは全て別会社のものと判定されました。採用ページURLを直接入力してください。`,
-            _diag: { droppedUrls, nameTokens },
+            _diag: { droppedUrls, nameTokens, search: searchDebug },
           },
           { status: 404 }
         );
