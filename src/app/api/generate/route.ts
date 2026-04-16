@@ -151,28 +151,40 @@ function stripPlatformBoilerplate(text: string): string {
 
 async function fetchJinaReader(url: string, timeoutMs = 20000): Promise<string> {
   const target = `https://r.jina.ai/${url}`;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(target, {
-      method: "GET",
-      headers: {
-        Accept: "text/plain",
-        "X-Return-Format": "markdown",
-      },
-      cache: "no-store",
-      signal: ctrl.signal,
-    });
-    if (!res.ok) {
-      throw new Error(`Jina Reader取得失敗: ${res.status} ${res.statusText}`);
+  const doFetch = async (): Promise<{ ok: boolean; status: number; text: string }> => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(target, {
+        method: "GET",
+        headers: {
+          Accept: "text/plain",
+          "X-Return-Format": "markdown",
+        },
+        cache: "no-store",
+        signal: ctrl.signal,
+      });
+      const text = res.ok ? await res.text() : "";
+      return { ok: res.ok, status: res.status, text };
+    } finally {
+      clearTimeout(timer);
     }
-    const raw = await res.text();
-    return stripPlatformBoilerplate(raw);
+  };
+  try {
+    let r = await doFetch();
+    // 429 はランダムJitter(400-900ms)待って1回だけリトライ (並列フェッチでバースト衝突しやすいため)
+    if (!r.ok && r.status === 429) {
+      const delay = 400 + Math.floor(Math.random() * 500);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      r = await doFetch();
+    }
+    if (!r.ok) {
+      throw new Error(`Jina Reader取得失敗: ${r.status}`);
+    }
+    return stripPlatformBoilerplate(r.text);
   } catch (e: any) {
     if (e?.name === "AbortError") throw new Error(`Jina Readerタイムアウト(${timeoutMs}ms): ${url}`);
     throw e;
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -1539,24 +1551,26 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // Stage 3: 個別求人詳細ページ(pages/XXXXX)を取得
-        // ソース: (a) Stage2本文(markdown)から抽出したisJobDetailUrl (b) HTML抽出で得たpages URL
+        // Stage 3: さらに深いページを取得
+        // ソース: (a) Stage2本文(markdown)から抽出した採用系URL (b) HTML抽出で得たpages URL
+        // 個別求人詳細(/pages/XXX)だけでなく、/recruit/workplace/assessment.html のような
+        // 給与・福利厚生・選考の詳細サブページ(=stage2ハブページからリンクされる)も拾う
         const stage2Added = contents.filter((c) => stage2Candidates.includes(c.url));
         const stage3Discovered = new Set<string>();
         for (const c of stage2Added) {
           for (const u of extractRecruitmentLinksFromContent(c.text)) {
-            if (!alreadyFetched.has(u) && !stage2Candidates.includes(u) && isJobDetailUrl(u)) {
+            if (!alreadyFetched.has(u) && !stage2Candidates.includes(u) && !isUselessAtsUrl(u)) {
               stage3Discovered.add(u);
             }
           }
         }
         for (const u of htmlDiscoveredPages) {
-          if (!alreadyFetched.has(u) && !stage2Candidates.includes(u) && isJobDetailUrl(u)) {
+          if (!alreadyFetched.has(u) && !stage2Candidates.includes(u) && !isUselessAtsUrl(u)) {
             stage3Discovered.add(u);
           }
         }
-        // 最大8件に拡大: ATS/企業HPの個別求人詳細まで広く拾う
-        const stage3Candidates = [...stage3Discovered].slice(0, 8);
+        // 最大8件、sortByPriority で /workplace/ /benefit/ /salary/ 系を優先
+        const stage3Candidates = sortByPriority([...stage3Discovered]).slice(0, 8);
         crawlDebug.stage3.candidates = stage3Candidates;
         if (stage3Candidates.length > 0) {
           console.log(`[crawl] Stage3: 個別求人詳細URL ${stage3Candidates.length}件`);
@@ -1780,7 +1794,12 @@ export async function POST(req: NextRequest) {
     };
 
     if (companyName) jobData.companyName = companyName;
-    if (jobTitle) jobData.jobTitle = jobTitle;
+    if (jobTitle) {
+      jobData.jobTitle = jobTitle;
+    } else if (!jobData.jobTitle && primaryPosition) {
+      // ユーザーが職種を指定していない場合は検出された代表ポジションを採用
+      jobData.jobTitle = primaryPosition;
+    }
     jobData.companyName = normalizeEmpty(jobData.companyName);
     jobData.jobTitle = normalizeEmpty(jobData.jobTitle);
     if (jobData.summary) jobData.summary = normalizeEmpty(jobData.summary);
