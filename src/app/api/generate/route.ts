@@ -1512,29 +1512,20 @@ export async function POST(req: NextRequest) {
 
         // ATS homes/ルートページは SPA のため markdown には個別求人リンクが無い。
         // 並行して HTML 版も取得し data-link-url / publishedUrl から抽出する。
-        // Jina 429 対策でバッチ化 (6件ずつ、間に300ms)
-        const BATCH2 = 6;
-        const stage2Results: PromiseSettledResult<{ url: string; text: string; pagesUrls: string[] }>[] = [];
-        for (let i = 0; i < stage2Candidates.length; i += BATCH2) {
-          const batch = stage2Candidates.slice(i, i + BATCH2);
-          const batchResults = await Promise.allSettled(
-            batch.map(async (url) => {
-              if (shouldHtmlExtractAts(url)) {
-                const [text, pagesUrls] = await Promise.all([
-                  fetchJinaReader(url, 8000),
-                  extractAtsLinksFromPage(url, 7000),
-                ]);
-                return { url, text, pagesUrls };
-              }
-              const text = await fetchJinaReader(url, 8000);
-              return { url, text, pagesUrls: [] as string[] };
-            })
-          );
-          stage2Results.push(...batchResults);
-          if (i + BATCH2 < stage2Candidates.length) {
-            await new Promise((r) => setTimeout(r, 300));
-          }
-        }
+        // 10件並列なら Jina レート制限の当たり方は許容範囲 (retry あり)
+        const stage2Results = await Promise.allSettled(
+          stage2Candidates.map(async (url) => {
+            if (shouldHtmlExtractAts(url)) {
+              const [text, pagesUrls] = await Promise.all([
+                fetchJinaReader(url, 8000),
+                extractAtsLinksFromPage(url, 7000),
+              ]);
+              return { url, text, pagesUrls };
+            }
+            const text = await fetchJinaReader(url, 8000);
+            return { url, text, pagesUrls: [] as string[] };
+          })
+        );
 
         const htmlDiscoveredPages: string[] = [];
         for (const r of stage2Results) {
