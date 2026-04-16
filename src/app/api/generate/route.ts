@@ -159,21 +159,23 @@ async function guessUrlsWithoutGrounding(
   companyName: string
 ): Promise<{ urls: string[]; usage: any }> {
   const prompt = [
-    `「${companyName}」について、あなたの**確実な知識にある**URLのみを出してください。`,
-    "推測で適当なスラッグを作らないこと。確信が持てない項目は空行でOK。",
+    `「${companyName}」の以下URLを推測してください。プレースホルダ({slug}等)を残さず、会社名のローマ字化/略称を考慮して実在しそうな具体値に必ず埋めてください。`,
     "",
-    "【出して欲しい項目（確信がある場合のみ）】",
-    "1. 公式ウェブサイトのホームURL (例: https://例の会社.co.jp/)",
-    "2. 公式サイトの採用/会社概要ページ (/careers /recruit /company など)",
-    "3. Talentio/HRMOS/Wantedly採用ページ（スラッグを確実に知っている場合のみ）",
+    "【出して欲しい項目】",
+    "1. 公式ウェブサイトのホームURL (例: https://<ローマ字ドメイン>.co.jp/ や .com/)",
+    "2. 公式サイトの採用ページ (/careers/ /recruit/ /company/careers/ など)",
+    "3. 公式サイトの会社概要ページ (/company/ /about/ など)",
+    "4. Talentio採用ページ (https://open.talentio.com/r/1/c/<会社スラッグ>/)",
+    "5. HRMOS採用ページ (https://hrmos.co/pages/<会社スラッグ>)",
+    "6. Wantedly企業ページ (https://www.wantedly.com/companies/<会社スラッグ>)",
     "",
-    "【禁止】",
-    "- プレースホルダ({slug}等)を残す",
-    "- 会社名から推測した架空スラッグの出力（例: 『オリゾ』→『orizo』は確信があればOK、『g-i-t』のような根拠無しスラッグは禁止）",
-    "- 以下の求人媒体:",
+    "※ 不明でも推測して出力。後段で実在確認するので、間違っていてもOK。",
+    "※ プレースホルダ({slug}, XXX等)を残したURLは絶対禁止。",
+    "",
+    "【除外】求人媒体:",
     BLOCKED_SITES.map((s) => `  - ${s}`).join("\n"),
     "",
-    "出力: URLのみ1行ずつ、最大6件。説明・番号・記号なし。確信が無ければ空出力。",
+    "出力: URLのみ1行ずつ、最大8件。説明・番号・記号なし。",
   ].join("\n");
 
   try {
@@ -263,47 +265,27 @@ async function findOfficialUrlWithGemini(
 ): Promise<{ urls: string[]; usage: any }> {
   const jobClause = jobTitle ? `特に「${jobTitle}」の個別求人ページがあれば最優先。` : "";
 
-  const atsPrompt = [
-    `「${companyName}」の採用関連URLをGoogle検索で探してください。${jobClause}`,
+  const broadPrompt = [
+    `「${companyName}」の公式URL群をGoogle検索で見つけてください。${jobClause}`,
     "",
-    "【最優先】求人詳細ページ（個別求人ID付きURLがあれば必ず）:",
-    `- open.talentio.com/r/*/c/*/pages/NNN`,
-    `- hrmos.co/pages/*/jobs/NNN`,
-    `- www.wantedly.com/projects/NNN`,
-    `- herp.careers/v1/*/*`,
-    `- 会社独自ドメインの /careers/jobs/ /recruit/jobs/ 個別ページ`,
+    "【検索ヒント：これらのクエリを内部で試してOK】",
+    `- "${companyName}" 公式サイト`,
+    `- "${companyName}" 採用 OR recruit OR careers`,
+    `- "${companyName}" talentio OR hrmos OR wantedly`,
+    `- "${companyName}" 会社概要 事業内容`,
     "",
-    "【次点】ATS採用サイトのルート/ブランドページも可:",
-    `- open.talentio.com/r/*/c/* のカンパニールート`,
-    `- hrmos.co/pages/* のブランドルート`,
-    `- www.wantedly.com/companies/* の企業ページ`,
+    "【出力したいURL】",
+    "- 会社公式サイト（ホーム・採用・会社概要・MVV）",
+    "- 求人詳細ページ（Talentio/HRMOS/Wantedly/Herpの個別URLがあれば最優先）",
     "",
     "【除外】以下の求人媒体は含めない:",
     BLOCKED_SITES.map((s) => `  - ${s}`).join("\n"),
     "",
-    "見つけたURLを全てhttps://付きで1行ずつ出力（最大10件）。説明・番号・記号不要。",
+    "見つけたURLを全てhttps://付きで1行ずつ出力（最大12件）。説明・番号・記号不要。",
   ].join("\n");
 
-  const corpPrompt = [
-    `「${companyName}」の**公式ウェブサイト**（会社自身のドメイン）の採用・会社情報ページをGoogle検索してください。`,
-    "",
-    "【集めるページ】",
-    "- 公式サイトのホーム（トップページ）",
-    "- 採用／キャリア／リクルート／募集ページ",
-    "- 会社概要・事業内容・代表メッセージ",
-    "- ミッション／ビジョン／バリュー・経営理念",
-    "- 福利厚生・働く環境",
-    "- 社員インタビュー・カルチャー紹介",
-    "",
-    "【除外】以下の求人媒体は含めない:",
-    BLOCKED_SITES.map((s) => `  - ${s}`).join("\n"),
-    "",
-    "見つけたURLを全てhttps://付きで1行ずつ出力（最大10件）。",
-  ].join("\n");
-
-  const [atsRes, corpRes, guessRes] = await Promise.all([
-    runGroundedSearch(ai, atsPrompt, 12000, "ATS詳細検索"),
-    runGroundedSearch(ai, corpPrompt, 12000, "企業サイト検索"),
+  const [groundRes, guessRes] = await Promise.all([
+    runGroundedSearch(ai, broadPrompt, 18000, "公式URL検索"),
     guessUrlsWithoutGrounding(ai, companyName).catch(() => ({
       urls: [] as string[],
       usage: {},
@@ -311,27 +293,24 @@ async function findOfficialUrlWithGemini(
   ]);
 
   const merged = Array.from(
-    new Set([...atsRes.urls, ...corpRes.urls, ...guessRes.urls])
+    new Set([...groundRes.urls, ...guessRes.urls])
   );
   const sorted = sortByPriority(merged);
   console.log(
-    `[search] ATS:${atsRes.urls.length} 企業:${corpRes.urls.length} 推測:${guessRes.urls.length} → 統合${sorted.length}件`
+    `[search] grounded:${groundRes.urls.length} 推測:${guessRes.urls.length} → 統合${sorted.length}件`
   );
 
   const usage = {
     promptTokenCount:
-      (atsRes.usage?.promptTokenCount || 0) +
-      (corpRes.usage?.promptTokenCount || 0) +
+      (groundRes.usage?.promptTokenCount || 0) +
       ((guessRes as any).usage?.promptTokenCount || 0),
     candidatesTokenCount:
-      (atsRes.usage?.candidatesTokenCount || 0) +
-      (corpRes.usage?.candidatesTokenCount || 0) +
+      (groundRes.usage?.candidatesTokenCount || 0) +
       ((guessRes as any).usage?.candidatesTokenCount || 0),
   };
 
   const debug = {
-    ats: (atsRes as any).debug,
-    corp: (corpRes as any).debug,
+    grounded: (groundRes as any).debug,
     guessUrls: guessRes.urls,
   };
 
@@ -519,7 +498,7 @@ async function generateCompanyPart(
         thinkingConfig: { thinkingBudget: 0 },
       } as any,
     }),
-    38000,
+    30000,
     "Gemini(企業パート生成)"
   );
 
@@ -568,7 +547,7 @@ async function generatePositionPart(
         thinkingConfig: { thinkingBudget: 0 },
       } as any,
     }),
-    38000,
+    30000,
     "Gemini(ポジションパート生成)"
   );
 
