@@ -221,6 +221,66 @@ function isAtsCompanyRootUrl(url: string): boolean {
   return false;
 }
 
+// ATSホスト上のURLが「企業固有ページ」か判定。
+// 例: open.talentio.com/r/1/c/orizo/ → true, open.talentio.com/ → false,
+// hrmos.co/terms/ → false, atsguide.hrmos.co/hc/... → false
+// これを満たさない ATS URL は会社特定に使えないので選定から除外する。
+function extractAtsCompanySlug(url: string): string | null {
+  try {
+    const u = new URL(url);
+    const host = u.host.toLowerCase();
+    const p = u.pathname;
+    if (host.endsWith("talentio.com")) {
+      const m = p.match(/^\/r\/[^/]+\/c\/([^/]+)/);
+      if (m) return m[1].toLowerCase();
+    }
+    if (host === "hrmos.co") {
+      // 会社非依存パスを除外: /terms/, /privacy/, /help/, /login/, /signup/ 等
+      if (/^\/(terms|privacy|help|login|signup|about|faq|agreement|contact|guide)(\/|$)/i.test(p)) return null;
+      const m = p.match(/^\/pages\/([^/]+)/);
+      if (m) return m[1].toLowerCase();
+    }
+    if (host === "wantedly.com" || host === "www.wantedly.com") {
+      const m = p.match(/^\/companies\/([^/]+)/);
+      if (m) return m[1].toLowerCase();
+    }
+    if (host.endsWith("herp.careers")) {
+      const m = p.match(/^\/v\d+\/([^/]+)/);
+      if (m) return m[1].toLowerCase();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// ATSホストのURLが「会社特定可能」(=企業スラッグを持つ) か
+function isAtsUrlCompanySpecific(url: string): boolean {
+  return extractAtsCompanySlug(url) !== null;
+}
+
+// ATSホスト上の明らかに会社非依存なURLを除外
+// (ルート、ヘルプ、利用規約、関連サブドメインなど)
+function isUselessAtsUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    const host = u.host.toLowerCase();
+    if (!isKnownAtsHost(url)) return false;
+    const p = u.pathname;
+    // ルート or パス無し
+    if (p === "" || p === "/") return true;
+    // 会社非依存のサブドメイン (例: atsguide.hrmos.co)
+    if (/^atsguide\.hrmos\.co$/i.test(host)) return true;
+    // ATSホスト上のgeneralパス
+    if (/^\/(terms|privacy|help|login|signup|about|faq|agreement|contact|guide)(\/|$)/i.test(p)) return true;
+    // 会社スラッグが抽出できないATS URLは(会社特定不能なので)除外
+    if (!isAtsUrlCompanySpecific(url)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 // ATSページ全般(ルート/一覧/詳細いずれも): HTML抽出で追加URLを発掘する価値がある
 function shouldHtmlExtractAts(url: string): boolean {
   if (isBlockedUrl(url)) return false;
@@ -267,21 +327,22 @@ function isCompanyHomepage(url: string): boolean {
 }
 
 // 優先度を考慮しつつホーム系URLも必ず枠を確保する取得対象選定。
-// 順序: (1) 求人詳細/ATS既知ホスト → (2) 会社HPのホームURL → (3) generic /recruit/ 等 → (4) 残り
+// 順序: (1) 求人詳細/ATS既知ホスト(企業固有) → (2) 会社HPのホームURL → (3) generic /recruit/ 等 → (4) 残り
 // 過去の事故: grounded search が「/recruit/」(404) ばかり返し、ATSルートが p1 4枠から溢れて失敗した。
+// Gemini guess が hrmos.co/ や open.talentio.com/ のような会社非依存URLを混ぜることもあるので、
+// ATSホストでも企業スラッグを持たないURLは除外する。
 function pickFetchCandidates(urls: string[], max: number): string[] {
-  const sorted = sortByPriority(urls);
+  // まず明らかに使えないATS URLを全体から除外
+  const usable = urls.filter((u) => !isUselessAtsUrl(u));
+  const sorted = sortByPriority(usable);
   const pAts = sorted.filter((u) => isJobDetailUrl(u) || isKnownAtsHost(u));
   const pHome = sorted.filter((u) => !pAts.includes(u) && isCompanyHomepage(u));
   const pOther = sorted.filter((u) => !pAts.includes(u) && !pHome.includes(u));
 
   const picked: string[] = [];
   const pushUnique = (u: string) => { if (!picked.includes(u)) picked.push(u); };
-  // ATS/求人詳細は最優先で全部入れる（最大5件まで）
   for (const u of pAts.slice(0, 5)) pushUnique(u);
-  // 会社HPのホームURLは必ず1件以上確保（ATSへのリンクの入口になるため）
   for (const u of pHome.slice(0, 2)) pushUnique(u);
-  // それ以外（/recruit/ 等）は余り枠で
   for (const u of pOther.slice(0, 3)) pushUnique(u);
   return picked.slice(0, max);
 }
@@ -913,16 +974,22 @@ export async function POST(req: NextRequest) {
 
     // ---------- 他社ページ混入ガード ----------
     // URL無しで会社名のみの場合、Jina本文に会社名トークンが含まれないページは他社ページとして除外。
-    // 例外: 既知ATSホストのURL (open.talentio.com/r/X/c/{slug}/ 等) はSPAで markdown が薄く
-    //       会社名を含まないことが多いが、URL自体が企業専用スラッグを持つので信頼する。
-    //       これをフィルタで落とすと正しい採用ページを取りこぼすことになる。
+    // ATS例外ポリシー:
+    //   - 企業固有ATS URL (slug持ち) かつ markdown が SPA プレースホルダ程度(〜2500文字) → 信頼
+    //     (SPA描画で実テキストが出ない場合があり、HTML抽出で辿るフェーズに委ねる)
+    //   - それ以外(本文がリッチに取れてる場合や企業非依存URL) → 会社名マッチを要求
+    // これにより「guessUrls が誤ったスラッグを返した」「ATSホストの規約ページ」等を弾く。
+    const SPA_PLACEHOLDER_LEN = 2500;
     const nameTokens = companyNameTokens(companyName);
     if (!companyUrl && nameTokens.length > 0) {
       const before = contents.length;
       const droppedUrls: string[] = [];
       const filtered = contents.filter((c) => {
-        // 既知ATSホストは会社名マッチを要求しない (URLで企業を特定できる)
-        if (isKnownAtsHost(c.url)) return true;
+        const atsSpaPass =
+          isKnownAtsHost(c.url) &&
+          isAtsUrlCompanySpecific(c.url) &&
+          c.text.length < SPA_PLACEHOLDER_LEN;
+        if (atsSpaPass) return true;
         const ok = textMentionsCompany(c.text, nameTokens);
         if (!ok) {
           droppedUrls.push(c.url);
@@ -977,17 +1044,18 @@ export async function POST(req: NextRequest) {
     {
       const alreadyFetched = new Set(contents.map((c) => c.url));
       const discovered = new Set<string>();
+      const addIfUsable = (u: string) => {
+        if (alreadyFetched.has(u) || discovered.has(u)) return;
+        if (isUselessAtsUrl(u)) return;
+        discovered.add(u);
+      };
       for (const c of contents) {
         const extracted = extractRecruitmentLinksFromContent(c.text);
         crawlDebug.stage2.extracted[c.url] = extracted;
-        for (const u of extracted) {
-          if (!alreadyFetched.has(u) && !discovered.has(u)) discovered.add(u);
-        }
+        for (const u of extracted) addIfUsable(u);
       }
       // Stage1.5 の HTML 抽出で見つけた /homes/XXX, /pages/XXX も Stage2 候補に入れる
-      for (const u of stage1AtsHtmlPages) {
-        if (!alreadyFetched.has(u) && !discovered.has(u)) discovered.add(u);
-      }
+      for (const u of stage1AtsHtmlPages) addIfUsable(u);
       crawlDebug.stage2.extracted["__stage1_html__"] = stage1AtsHtmlPages;
       const stage2Candidates = sortByPriority([...discovered]).slice(0, 4);
       crawlDebug.stage2.candidates = stage2Candidates;
@@ -1014,9 +1082,12 @@ export async function POST(req: NextRequest) {
         const htmlDiscoveredPages: string[] = [];
         for (const r of stage2Results) {
           if (r.status === "fulfilled" && r.value.text && r.value.text.length > MIN_TEXT_LEN) {
-            // 既知ATSホストは URL で企業特定できるため会社名マッチ不要（Stage 1 と同ポリシー）
-            const trustByAtsHost = isKnownAtsHost(r.value.url);
-            if (trustByAtsHost || nameTokens.length === 0 || textMentionsCompany(r.value.text, nameTokens)) {
+            // ATS例外: 企業固有URLかつSPAプレースホルダ相当の短文のみ信頼（Stage 1 と同ポリシー）
+            const atsSpaPass =
+              isKnownAtsHost(r.value.url) &&
+              isAtsUrlCompanySpecific(r.value.url) &&
+              r.value.text.length < SPA_PLACEHOLDER_LEN;
+            if (atsSpaPass || nameTokens.length === 0 || textMentionsCompany(r.value.text, nameTokens)) {
               contents.push({ url: r.value.url, text: r.value.text });
               crawlDebug.stage2.fetched.push({ url: r.value.url, len: r.value.text.length, status: "ok", htmlPages: r.value.pagesUrls.length });
               console.log(`  ✓ Stage2 ${r.value.url} (${r.value.text.length}文字, HTML抽出pages:${r.value.pagesUrls.length}件)`);
