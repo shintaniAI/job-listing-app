@@ -153,6 +153,18 @@ function extractUrls(text: string): string[] {
   return [...out];
 }
 
+// 取得済みJina本文（マークダウン）から、ATS/採用系URLを抽出
+// 例: orizo.co.jp の本文に [RECRUIT](https://open.talentio.com/r/1/c/orizo/homes/4235) があれば拾う
+function extractRecruitmentLinksFromContent(text: string): string[] {
+  const urls = extractUrls(text);
+  // 画像・CSS・JSなど静的アセットを除外
+  return urls.filter((u) => {
+    if (/\.(png|jpg|jpeg|gif|svg|webp|ico|css|js|woff2?|ttf|eot|pdf)(\?|#|$)/i.test(u)) return false;
+    // ATS/採用系ホストを優先
+    return isPreferredHost(u) || isJobDetailUrl(u);
+  });
+}
+
 // フォールバック: Groundingを使わず知識ベースで具体URL推測（高速）
 async function guessUrlsWithoutGrounding(
   ai: GoogleGenAI,
@@ -285,7 +297,7 @@ async function findOfficialUrlWithGemini(
   ].join("\n");
 
   const [groundRes, guessRes] = await Promise.all([
-    runGroundedSearch(ai, broadPrompt, 18000, "公式URL検索"),
+    runGroundedSearch(ai, broadPrompt, 15000, "公式URL検索"),
     guessUrlsWithoutGrounding(ai, companyName).catch(() => ({
       urls: [] as string[],
       usage: {},
@@ -498,7 +510,7 @@ async function generateCompanyPart(
         thinkingConfig: { thinkingBudget: 0 },
       } as any,
     }),
-    30000,
+    22000,
     "Gemini(企業パート生成)"
   );
 
@@ -547,7 +559,7 @@ async function generatePositionPart(
         thinkingConfig: { thinkingBudget: 0 },
       } as any,
     }),
-    30000,
+    22000,
     "Gemini(ポジションパート生成)"
   );
 
@@ -698,7 +710,7 @@ export async function POST(req: NextRequest) {
     const MIN_TEXT_LEN = 150;
 
     const fetchResults = await Promise.allSettled(
-      fetchCandidates.map((url) => fetchJinaReader(url, 10000).then((text) => ({ url, text })))
+      fetchCandidates.map((url) => fetchJinaReader(url, 8000).then((text) => ({ url, text })))
     );
     for (const r of fetchResults) {
       if (r.status === "fulfilled" && r.value.text && r.value.text.length > MIN_TEXT_LEN) {
@@ -759,6 +771,75 @@ export async function POST(req: NextRequest) {
       }
       contents.length = 0;
       contents.push(...filtered);
+    }
+
+    // ---------- Stage 2: Stage1本文からATS/採用系リンクを抽出して追加取得 ----------
+    // 例: orizo.co.jp の本文に [RECRUIT](https://open.talentio.com/r/1/c/orizo/homes/4235) があれば、
+    // そこを辿って深い採用情報を取りに行く。会社HP→ATSの2段階クロールが必要なケースを救う。
+    {
+      const alreadyFetched = new Set(contents.map((c) => c.url));
+      const discovered = new Set<string>();
+      for (const c of contents) {
+        for (const u of extractRecruitmentLinksFromContent(c.text)) {
+          if (!alreadyFetched.has(u) && !discovered.has(u)) discovered.add(u);
+        }
+      }
+      const stage2Candidates = sortByPriority([...discovered]).slice(0, 4);
+      if (stage2Candidates.length > 0) {
+        console.log(`[crawl] Stage2: Stage1本文から${stage2Candidates.length}件の追加URLを発見`);
+        console.log(`[crawl] Stage2対象:`, stage2Candidates);
+        const stage2Results = await Promise.allSettled(
+          stage2Candidates.map((url) =>
+            fetchJinaReader(url, 8000).then((text) => ({ url, text }))
+          )
+        );
+        for (const r of stage2Results) {
+          if (r.status === "fulfilled" && r.value.text && r.value.text.length > MIN_TEXT_LEN) {
+            // 会社名が含まれるページだけ採用
+            if (nameTokens.length === 0 || textMentionsCompany(r.value.text, nameTokens)) {
+              contents.push(r.value);
+              console.log(`  ✓ Stage2 ${r.value.url} (${r.value.text.length}文字)`);
+            } else {
+              console.log(`  × Stage2 除外(会社名不一致): ${r.value.url}`);
+            }
+          } else if (r.status === "rejected") {
+            console.log(`  ✗ Stage2 ${r.reason?.message || r.reason}`);
+          }
+        }
+
+        // Stage 2でATS homes/会社TOPを取得できた場合、さらにそこから個別求人ページ(pages/XXX)を辿る
+        // 例: talentio の homes/4235 → pages/118392 の個別求人詳細
+        const stage2Added = contents.filter((c) => stage2Candidates.includes(c.url));
+        const stage3Discovered = new Set<string>();
+        for (const c of stage2Added) {
+          for (const u of extractRecruitmentLinksFromContent(c.text)) {
+            if (!alreadyFetched.has(u) && !stage2Candidates.includes(u) && !stage3Discovered.has(u)) {
+              // 個別求人詳細URLだけを対象（ここで絞らないとページ一覧で無限に増える）
+              if (isJobDetailUrl(u)) stage3Discovered.add(u);
+            }
+          }
+        }
+        const stage3Candidates = [...stage3Discovered].slice(0, 2);
+        if (stage3Candidates.length > 0) {
+          console.log(`[crawl] Stage3: 個別求人詳細URL ${stage3Candidates.length}件`);
+          console.log(`[crawl] Stage3対象:`, stage3Candidates);
+          const stage3Results = await Promise.allSettled(
+            stage3Candidates.map((url) =>
+              fetchJinaReader(url, 6000).then((text) => ({ url, text }))
+            )
+          );
+          for (const r of stage3Results) {
+            if (r.status === "fulfilled" && r.value.text && r.value.text.length > MIN_TEXT_LEN) {
+              if (nameTokens.length === 0 || textMentionsCompany(r.value.text, nameTokens)) {
+                contents.push(r.value);
+                console.log(`  ✓ Stage3 ${r.value.url} (${r.value.text.length}文字)`);
+              }
+            } else if (r.status === "rejected") {
+              console.log(`  ✗ Stage3 ${r.reason?.message || r.reason}`);
+            }
+          }
+        }
+      }
     }
 
     // ---------- content-aware ランキング & 予算配分 ----------
