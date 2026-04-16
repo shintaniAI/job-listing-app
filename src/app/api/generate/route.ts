@@ -306,6 +306,58 @@ async function extractAtsLinksFromPage(pageUrl: string, timeoutMs = 7000): Promi
 // 後方互換エイリアス
 const extractPagesUrlsFromAtsHome = extractAtsLinksFromPage;
 
+// 会社の採用サイト sitemap.xml から個別求人ページ等のURL一覧を取得する
+// Cybozu のように個別求人ページ(/recruit/entry/career/XXX.html)がメインナビから
+// リンクされず sitemap.xml 経由でしか発見できないケースを救うため。
+// 候補パス: /recruit/sitemap.xml (採用専用) と /sitemap.xml (全体) を並列試行
+async function fetchSitemapUrls(hostUrl: string, timeoutMs = 5000): Promise<string[]> {
+  let origin: string;
+  let basePath: string;
+  try {
+    const u = new URL(hostUrl);
+    origin = u.origin;
+    basePath = u.pathname;
+  } catch {
+    return [];
+  }
+  // 採用セクション配下のサブサイトマップを優先 (例: /recruit/sitemap.xml)
+  // basePath が /recruit/... なら /recruit/sitemap.xml を筆頭に試す
+  const candidates: string[] = [];
+  const seg = basePath.split("/").filter(Boolean);
+  if (seg[0]) candidates.push(`${origin}/${seg[0]}/sitemap.xml`);
+  candidates.push(`${origin}/sitemap.xml`);
+  const seen = new Set(candidates);
+  const urls = new Set<string>();
+  await Promise.allSettled(
+    candidates.map(async (smUrl) => {
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+        try {
+          const res = await fetch(smUrl, {
+            method: "GET",
+            headers: {
+              "User-Agent":
+                "Mozilla/5.0 (compatible; JobListingBot/1.0; +https://job-listing-app.vercel.app)",
+              Accept: "application/xml,text/xml,*/*",
+            },
+            cache: "no-store",
+            signal: ctrl.signal,
+          });
+          if (!res.ok) return;
+          const xml = await res.text();
+          const re = /<loc>\s*([^<\s]+)\s*<\/loc>/gi;
+          let m: RegExpExecArray | null;
+          while ((m = re.exec(xml))) urls.add(m[1].trim());
+        } finally {
+          clearTimeout(timer);
+        }
+      } catch {}
+    })
+  );
+  return [...urls];
+}
+
 // 求人媒体判定（排除ではなく優先度調整用）
 function isSecondaryJobSite(url: string): boolean {
   const lower = url.toLowerCase();
@@ -1631,9 +1683,56 @@ export async function POST(req: NextRequest) {
             stage3Discovered.add(u);
           }
         }
-        // 最大4件、sortByPriority で /workplace/ /benefit/ /salary/ 系を最優先
-        // 本当に求人票に必要なのは 給与/福利厚生/働き方/勤務地 の4つ。onboarding等は優先度低。
-        const stage3Candidates = sortByPriority([...stage3Discovered]).slice(0, 4);
+        // sitemap.xml からの補強: Cybozuのように個別求人ページがメインナビから
+        // リンクされないケースを救う。非ATSの各ホストで sitemap を探索し、
+        // JOB_DETAIL_PATTERNS に合致するURLを拾う。取得済みの具体ページから給与/選考/休日等を得る。
+        const sitemapHosts = new Set<string>();
+        for (const c of contents) {
+          if (isKnownAtsHost(c.url)) continue;
+          try {
+            const u = new URL(c.url);
+            const firstSeg = u.pathname.split("/").filter(Boolean)[0];
+            // 採用セクション配下は /recruit/sitemap.xml を優先的に試すため、
+            // 第1パス配下のURLを渡す (fetchSitemapUrls 内で適切なsitemapを選ぶ)
+            sitemapHosts.add(`${u.origin}${firstSeg ? `/${firstSeg}/` : "/"}`);
+          } catch {}
+        }
+        const sitemapJobUrls: string[] = [];
+        if (sitemapHosts.size > 0) {
+          const smResults = await Promise.allSettled(
+            [...sitemapHosts].slice(0, 3).map((h) => fetchSitemapUrls(h, 5000))
+          );
+          for (const r of smResults) {
+            if (r.status === "fulfilled") {
+              for (const u of r.value) {
+                if (!alreadyFetched.has(u) && !stage2Candidates.includes(u) && !isUselessAtsUrl(u) && isJobDetailUrl(u)) {
+                  sitemapJobUrls.push(u);
+                }
+              }
+            }
+          }
+          // 多数(例: Cybozu 309件)を一気に入れると sortByPriority が全てrank=0で埋め尽くされ
+          // workplace/benefit 等のハブ枠が奪われる。個別求人ページは「給与/選考の生データ取得」用に
+          // 2件だけ採用する (職種で重複しないよう簡易ディスパースィング)
+          const categorized = new Map<string, string>(); // category slug → url
+          for (const u of sitemapJobUrls) {
+            // `/entry/career/product-engineer-kintone.html` → category "product"
+            const m = u.match(/\/([a-z0-9-]+)\.html?$/i);
+            const slug = m ? m[1] : u;
+            const cat = slug.split("-")[0] || slug;
+            if (!categorized.has(cat)) categorized.set(cat, u);
+            if (categorized.size >= 2) break;
+          }
+          for (const u of categorized.values()) stage3Discovered.add(u);
+          if (categorized.size > 0) {
+            console.log(`[crawl] sitemap経由で個別求人URLを${sitemapJobUrls.length}件発見 → ${categorized.size}件採用`);
+          }
+          (crawlDebug.stage3 as any).sitemapDiscoveredTotal = sitemapJobUrls.length;
+          (crawlDebug.stage3 as any).sitemapAdopted = [...categorized.values()];
+        }
+        // 最大5件、sortByPriority で /workplace/ /benefit/ /salary/ 系を最優先
+        // sitemap 経由の個別求人は rank=0 (isJobDetailUrl) で高順位。多様な職種を取るため枠+1
+        const stage3Candidates = sortByPriority([...stage3Discovered]).slice(0, 5);
         crawlDebug.stage3.candidates = stage3Candidates;
         if (stage3Candidates.length > 0) {
           console.log(`[crawl] Stage3: ハブ配下URL ${stage3Candidates.length}件`);
