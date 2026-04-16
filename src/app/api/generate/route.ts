@@ -202,7 +202,7 @@ async function runGroundedSearch(
   prompt: string,
   timeoutMs: number,
   label: string
-): Promise<{ urls: string[]; usage: any }> {
+): Promise<{ urls: string[]; usage: any; debug: any }> {
   try {
     const result = await withTimeout(
       ai.models.generateContent({
@@ -217,13 +217,18 @@ async function runGroundedSearch(
     const direct = extractUrls(text);
 
     const grounded: string[] = [];
+    const searchQueries: string[] = [];
     try {
       const candidates: any[] = (result as any).candidates || [];
       for (const c of candidates) {
-        const chunks = c?.groundingMetadata?.groundingChunks || [];
+        const meta = c?.groundingMetadata || {};
+        const chunks = meta.groundingChunks || [];
         for (const ch of chunks) {
           const u = ch?.web?.uri;
           if (u && /^https?:\/\//.test(u) && !isBlockedUrl(u)) grounded.push(u);
+        }
+        if (Array.isArray(meta.webSearchQueries)) {
+          for (const q of meta.webSearchQueries) if (typeof q === "string") searchQueries.push(q);
         }
       }
     } catch {}
@@ -233,10 +238,17 @@ async function runGroundedSearch(
     return {
       urls: merged,
       usage: (result as any).usageMetadata || {},
+      debug: {
+        label,
+        textSample: text.slice(0, 400),
+        textUrls: direct,
+        groundingUrls: grounded,
+        searchQueries,
+      },
     };
   } catch (e: any) {
     console.log(`[search] ${label} 失敗: ${e.message}`);
-    return { urls: [], usage: {} };
+    return { urls: [], usage: {}, debug: { label, error: e.message } };
   }
 }
 
@@ -317,7 +329,13 @@ async function findOfficialUrlWithGemini(
       ((guessRes as any).usage?.candidatesTokenCount || 0),
   };
 
-  return { urls: sorted.slice(0, 12), usage };
+  const debug = {
+    ats: (atsRes as any).debug,
+    corp: (corpRes as any).debug,
+    guessUrls: guessRes.urls,
+  };
+
+  return { urls: sorted.slice(0, 12), usage, debug } as any;
 }
 
 // ---------- 複数ポジション検出 ----------
@@ -671,8 +689,12 @@ export async function POST(req: NextRequest) {
       targetUrls = r.urls;
       searchUsage = r.usage;
       if (targetUrls.length === 0) {
-        throw new Error(
-          "公式採用ページのURLが見つかりませんでした。採用ページURLを直接入力してください。"
+        return NextResponse.json(
+          {
+            error: "公式採用ページのURLが見つかりませんでした。採用ページURLを直接入力してください。",
+            _diag: (r as any).debug || null,
+          },
+          { status: 500 }
         );
       }
       console.log(`[search] 候補URL: ${targetUrls.length}件`);
