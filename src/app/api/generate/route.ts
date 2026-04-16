@@ -115,12 +115,28 @@ const GENERATION_INSTRUCTION = `あなたは求人票作成の専門家です。
 - 数値・固有名詞・制度名は原文通りに転記する
 - 情報がない項目は値を "情報なし" にする（フロントで自動非表示にする）
 - 雛形にないキーは自由に追加してよい（例: "代表メッセージ", "選考フロー", "1日のスケジュール", "一日の流れ"）
-- 業務内容・福利厚生は原文に出てくる全項目を列挙する（雛形の5個に縛られず、10個20個でもOK）
+- 業務内容・福利厚生は原文に出てくる全項目を**個別キーに分けて**列挙する
+
+【JSON値のフォーマット規則 - 絶対厳守】
+- **各セクションの値は必ず「文字列」で返す**（配列・ネストオブジェクト禁止）
+- 複数項目がある場合は**個別のキーに分ける**（例: "主な業務内容1", "主な業務内容2", "主な業務内容3"...）
+- 箇条書きを1つのキーに入れる場合は改行区切りの文字列（"・項目1\\n・項目2\\n・項目3"）
+- 給与の内訳のような階層情報も、個別キーに展開する（例: "固定時間外手当", "固定深夜手当", "年俸月額"）
+
+【項目数のミニマム】
+- companyInfo: 8項目以上（MVV / 事業 / 特徴 / 代表メッセージ / カルチャー等）
+- jobContent: 業務内容だけで5〜15項目（"主な業務内容1"～"主な業務内容N"）+ 業務の流れ / 配属 / キャリアパス
+- requirements: 必須3項目 + 歓迎3項目以上 + 求める人物像
+- salary: 8項目以上（年収 / 月給 / 固定時間外手当 / 固定深夜手当 / 昇給 / 賞与 / 諸手当 等）
+- workConditions: 7項目以上
+- holidays: 5項目以上
+- benefits: 10項目以上（社会保険 / 健康 / 住宅 / 育児 / スキルアップ / 食事 / レクリエーション 等、独自制度は全て個別キー化）
 
 【禁止事項】
 - 要約・言い換え
 - 推測・創作
 - 「詳細は面接時」だけで済ませる（原文にあれば必ず具体化）
+- 配列 [...] やネスト {...} を値に入れること
 
 【品質基準】
 - 1項目20〜300文字、具体的数値・固有名詞を含む
@@ -305,6 +321,63 @@ export async function POST(req: NextRequest) {
         jobData[s] = {};
       }
     }
+
+    // ネストしたオブジェクト/配列を flat な文字列に変換（フロントの textarea 表示前提）
+    const flattenValue = (v: any, depth = 0): string => {
+      if (v === null || v === undefined) return "";
+      if (typeof v === "string") return v;
+      if (typeof v === "number" || typeof v === "boolean") return String(v);
+      if (Array.isArray(v)) {
+        return v
+          .map((item) => flattenValue(item, depth + 1))
+          .filter((s) => s.trim().length > 0)
+          .map((s) => (depth === 0 ? `・${s}` : s))
+          .join("\n");
+      }
+      if (typeof v === "object") {
+        return Object.entries(v)
+          .map(([k, val]) => {
+            const sub = flattenValue(val, depth + 1);
+            return sub ? `${k}: ${sub}` : "";
+          })
+          .filter((s) => s.length > 0)
+          .join("\n");
+      }
+      return String(v);
+    };
+
+    // 子キーを1段階にフラット化して追加キーとして展開する
+    // 例: salary.給与内訳 = { 提示年俸総額内訳: "X", 月給換算額の定義: "Y" }
+    //   → salary["給与内訳_提示年俸総額内訳"] = "X"
+    //   → salary["給与内訳_月給換算額の定義"] = "Y"
+    // かつ salary.給与内訳 自体も flat string として残す
+    for (const sectionKey of requiredSections) {
+      const section = jobData[sectionKey];
+      const expanded: Record<string, string> = {};
+      for (const [k, v] of Object.entries(section)) {
+        // ネストオブジェクトは子キーも展開（情報密度を増やす）
+        if (
+          v &&
+          typeof v === "object" &&
+          !Array.isArray(v) &&
+          Object.keys(v as any).length > 0
+        ) {
+          for (const [ck, cv] of Object.entries(v as any)) {
+            expanded[`${k}｜${ck}`] = flattenValue(cv);
+          }
+        } else {
+          expanded[k] = flattenValue(v);
+        }
+      }
+      jobData[sectionKey] = expanded;
+    }
+
+    // トップレベルの文字列化
+    if (typeof jobData.summary !== "string") jobData.summary = flattenValue(jobData.summary);
+    if (typeof jobData.companyName !== "string")
+      jobData.companyName = flattenValue(jobData.companyName);
+    if (typeof jobData.jobTitle !== "string")
+      jobData.jobTitle = flattenValue(jobData.jobTitle);
 
     jobData.sources = contents.map((c) => c.url);
 
