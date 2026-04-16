@@ -822,15 +822,22 @@ export async function POST(req: NextRequest) {
     // ---------- Stage 2: Stage1本文からATS/採用系リンクを抽出して追加取得 ----------
     // 例: orizo.co.jp の本文に [RECRUIT](https://open.talentio.com/r/1/c/orizo/homes/4235) があれば、
     // そこを辿って深い採用情報を取りに行く。会社HP→ATSの2段階クロールが必要なケースを救う。
+    const crawlDebug: any = {
+      stage2: { candidates: [] as string[], fetched: [] as any[], extracted: {} as any },
+      stage3: { candidates: [] as string[], fetched: [] as any[] },
+    };
     {
       const alreadyFetched = new Set(contents.map((c) => c.url));
       const discovered = new Set<string>();
       for (const c of contents) {
-        for (const u of extractRecruitmentLinksFromContent(c.text)) {
+        const extracted = extractRecruitmentLinksFromContent(c.text);
+        crawlDebug.stage2.extracted[c.url] = extracted;
+        for (const u of extracted) {
           if (!alreadyFetched.has(u) && !discovered.has(u)) discovered.add(u);
         }
       }
       const stage2Candidates = sortByPriority([...discovered]).slice(0, 4);
+      crawlDebug.stage2.candidates = stage2Candidates;
       if (stage2Candidates.length > 0) {
         console.log(`[crawl] Stage2: Stage1本文から${stage2Candidates.length}件の追加URLを発見`);
         console.log(`[crawl] Stage2対象:`, stage2Candidates);
@@ -844,11 +851,16 @@ export async function POST(req: NextRequest) {
             // 会社名が含まれるページだけ採用
             if (nameTokens.length === 0 || textMentionsCompany(r.value.text, nameTokens)) {
               contents.push(r.value);
+              crawlDebug.stage2.fetched.push({ url: r.value.url, len: r.value.text.length, status: "ok" });
               console.log(`  ✓ Stage2 ${r.value.url} (${r.value.text.length}文字)`);
             } else {
+              crawlDebug.stage2.fetched.push({ url: r.value.url, len: r.value.text.length, status: "filtered-offtopic" });
               console.log(`  × Stage2 除外(会社名不一致): ${r.value.url}`);
             }
+          } else if (r.status === "fulfilled") {
+            crawlDebug.stage2.fetched.push({ url: r.value.url, len: r.value.text?.length || 0, status: "too-short" });
           } else if (r.status === "rejected") {
+            crawlDebug.stage2.fetched.push({ status: "rejected", reason: String(r.reason?.message || r.reason) });
             console.log(`  ✗ Stage2 ${r.reason?.message || r.reason}`);
           }
         }
@@ -866,6 +878,7 @@ export async function POST(req: NextRequest) {
           }
         }
         const stage3Candidates = [...stage3Discovered].slice(0, 2);
+        crawlDebug.stage3.candidates = stage3Candidates;
         if (stage3Candidates.length > 0) {
           console.log(`[crawl] Stage3: 個別求人詳細URL ${stage3Candidates.length}件`);
           console.log(`[crawl] Stage3対象:`, stage3Candidates);
@@ -878,9 +891,13 @@ export async function POST(req: NextRequest) {
             if (r.status === "fulfilled" && r.value.text && r.value.text.length > MIN_TEXT_LEN) {
               if (nameTokens.length === 0 || textMentionsCompany(r.value.text, nameTokens)) {
                 contents.push(r.value);
+                crawlDebug.stage3.fetched.push({ url: r.value.url, len: r.value.text.length, status: "ok" });
                 console.log(`  ✓ Stage3 ${r.value.url} (${r.value.text.length}文字)`);
+              } else {
+                crawlDebug.stage3.fetched.push({ url: r.value.url, len: r.value.text.length, status: "filtered-offtopic" });
               }
             } else if (r.status === "rejected") {
+              crawlDebug.stage3.fetched.push({ status: "rejected", reason: String(r.reason?.message || r.reason) });
               console.log(`  ✗ Stage3 ${r.reason?.message || r.reason}`);
             }
           }
@@ -1122,6 +1139,7 @@ export async function POST(req: NextRequest) {
         total_usd: +totalUSD.toFixed(6),
         total_jpy_approx: +(totalUSD * usdToJpy).toFixed(3),
       },
+      crawl: crawlDebug,
     };
 
     console.log(
