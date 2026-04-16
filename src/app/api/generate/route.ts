@@ -1577,10 +1577,19 @@ export async function POST(req: NextRequest) {
         if (stage3Candidates.length > 0) {
           console.log(`[crawl] Stage3: ハブ配下URL ${stage3Candidates.length}件`);
           console.log(`[crawl] Stage3対象:`, stage3Candidates);
-          // Jina 429 対策: 4件並列で十分 (Stage2終了後で前のバーストと重ならない)
+          // Jina 429 対策: Stage2 完了直後に4並列するとレート制限で全滅する。
+          // 2秒待機＋1件ずつ200ms staggerで発火することでバースト回避。
+          await new Promise((r) => setTimeout(r, 2000));
           const stage3Results = await Promise.allSettled(
-            stage3Candidates.map((url) =>
-              fetchJinaReader(url, 9000).then((text) => ({ url, text }))
+            stage3Candidates.map(
+              (url, i) =>
+                new Promise<{ url: string; text: string }>((resolve, reject) => {
+                  setTimeout(() => {
+                    fetchJinaReader(url, 9000)
+                      .then((text) => resolve({ url, text }))
+                      .catch(reject);
+                  }, i * 200);
+                })
             )
           );
           for (const r of stage3Results) {
