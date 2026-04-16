@@ -279,15 +279,17 @@ async function detectPositionsWithGemini(
 
 // ====== プロンプト（talentio/HRMOS 実物ベースに再設計） ======
 const COMMON_RULES = `【絶対ルール】
-- 採用ページに書かれている**原文の情報を全て**JSONに反映する（省略・抜粋禁止）
-- 箇条書き・表・制度一覧は1項目ずつ個別キーに分けて転記する（「など」で端折らない）
-- 数値・固有名詞・制度名・金額は**原文通りに**転記（改変・丸めをしない）
+- **最優先**: 先頭に記載された「=== SOURCE URL: ...」の最初のソース（通常はTalentio/HRMOS/Wantedly等の求人詳細ページ）を**正本**として扱い、その原文を**ほぼ逐語的に**全てJSONへ転記する
+- 原文の章見出し（「求人概要」「職務内容」「応募資格」「報酬」「諸手当」「休日・休暇」「福利厚生」「事業概要」「ミッション」「ビジョン」「バリュー」「カルチャー」等）を全てカバーする
+- 箇条書き・表・制度一覧は1項目ずつ個別キーに分けて転記する（「など」で端折らない／まとめない）
+- 数値・固有名詞・制度名・金額・時間帯・時間数は**原文通りに**転記（改変・丸め・言い換え禁止）
 - 情報がない項目は値を空文字列 "" にする（"情報なし"等の文字列を入れない）
 - 雛形にないキーは自由に追加してよい（原文にある情報は全部拾う）
 - 値は必ず「文字列」（配列・ネストオブジェクト禁止）
 - 複数項目がある場合は個別キー（例: "主な業務内容1","主な業務内容2"...）に分ける
-- **推測・創作・要約は完全禁止**。原文に書かれていないことは絶対に書かない
-- **Indeed/doda/マイナビ転職/リクナビNEXT/エン転職等の求人媒体に書いてある表現や情報は一切使わない**。採用ページ原文のみを根拠とする。`;
+- **推測・創作・要約・短縮は完全禁止**。原文に書かれていないことは絶対に書かない／書かれていることを端折らない
+- **Indeed/doda/マイナビ転職/リクナビNEXT/エン転職等の求人媒体に書いてある表現や情報は一切使わない**。採用ページ原文のみを根拠とする
+- 原文が長い場合は項目数を増やしてでも全て拾う（値が長くても省略しない）`;
 
 // パートA: 企業全体情報
 const PROMPT_COMPANY_PART = `あなたは採用ページ原文から求人票を作成する専門家です。与えられた**企業公式の採用ページ全文**から、**企業全体に関する情報**のみをJSONで出力してください。
@@ -406,11 +408,11 @@ async function generateCompanyPart(
       config: {
         responseMimeType: "application/json",
         temperature: 0.1,
-        maxOutputTokens: 12000,
+        maxOutputTokens: 20000,
         thinkingConfig: { thinkingBudget: 0 },
       } as any,
     }),
-    32000,
+    42000,
     "Gemini(企業パート生成)"
   );
 
@@ -455,11 +457,11 @@ async function generatePositionPart(
       config: {
         responseMimeType: "application/json",
         temperature: 0.1,
-        maxOutputTokens: 12000,
+        maxOutputTokens: 20000,
         thinkingConfig: { thinkingBudget: 0 },
       } as any,
     }),
-    32000,
+    42000,
     "Gemini(ポジションパート生成)"
   );
 
@@ -557,9 +559,13 @@ export async function POST(req: NextRequest) {
           { status: 400 }
         );
       }
-      // ユーザー指定URLを優先しつつ、同じ会社の他ページも補助的に探す
       targetUrls = [companyUrl];
-      if (companyName) {
+      // ユーザーが求人詳細ページ(Talentio/HRMOS/Wantedly等)を指定した場合は、
+      // その1ソースが最も密度が高い正本なので補助URL探索はスキップし、内容の希釈を防ぐ
+      const isPrimaryDetail = isJobDetailUrl(companyUrl);
+      if (isPrimaryDetail) {
+        console.log(`[search] 指定URLは求人詳細ページと判定: 補助URL探索をスキップ (${companyUrl})`);
+      } else if (companyName) {
         try {
           const more = await findOfficialUrlWithGemini(ai, companyName, jobTitle);
           searchUsage = more.usage;
@@ -599,7 +605,7 @@ export async function POST(req: NextRequest) {
     const MIN_TEXT_LEN = 150;
 
     const fetchResults = await Promise.allSettled(
-      fetchCandidates.map((url) => fetchJinaReader(url, 15000).then((text) => ({ url, text })))
+      fetchCandidates.map((url) => fetchJinaReader(url, 12000).then((text) => ({ url, text })))
     );
     for (const r of fetchResults) {
       if (r.status === "fulfilled" && r.value.text && r.value.text.length > MIN_TEXT_LEN) {
