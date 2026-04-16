@@ -179,6 +179,15 @@ async function fetchJinaReader(url: string, timeoutMs = 20000): Promise<string> 
       await new Promise((resolve) => setTimeout(resolve, delay));
       r = await doFetch();
     }
+    // それでも 429 なら直接fetch→HTMLパースにフォールバック (Jina 無料枠の20RPM制限回避)
+    if (!r.ok && r.status === 429) {
+      try {
+        const direct = await fetchDirectAndExtractText(url, timeoutMs);
+        if (direct && direct.length > 300) return stripPlatformBoilerplate(direct);
+      } catch {
+        // direct 失敗は fallthrough して下の throw
+      }
+    }
     if (!r.ok) {
       throw new Error(`Jina Reader取得失敗: ${r.status}`);
     }
@@ -186,6 +195,50 @@ async function fetchJinaReader(url: string, timeoutMs = 20000): Promise<string> 
   } catch (e: any) {
     if (e?.name === "AbortError") throw new Error(`Jina Readerタイムアウト(${timeoutMs}ms): ${url}`);
     throw e;
+  }
+}
+
+// Jina の代替: 直接URLをfetchしてHTMLから本文テキストを抽出する
+// Jina が 429 の時のフォールバックとしてのみ使用 (品質は Jina の markdown 変換より落ちる)
+async function fetchDirectAndExtractText(url: string, timeoutMs = 8000): Promise<string> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (compatible; JobListingBot/1.0; +https://job-listing-app.vercel.app)",
+        Accept: "text/html,application/xhtml+xml",
+        "Accept-Language": "ja,en;q=0.8",
+      },
+      cache: "no-store",
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`direct fetch 失敗: ${res.status}`);
+    const html = await res.text();
+    // script/style を削る → タグを除去 → 連続空白を圧縮
+    const cleaned = html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+      .replace(/<!--[\s\S]*?-->/g, " ")
+      .replace(/<br\s*\/?\s*>/gi, "\n")
+      .replace(/<\/(p|div|li|h[1-6]|tr|td|th|section|article)>/gi, "\n")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/&quot;/gi, '"')
+      .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n[ \t]+/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    return cleaned;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
