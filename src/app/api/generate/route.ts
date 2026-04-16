@@ -35,12 +35,18 @@ const PREFERRED_HOSTS = [
 ];
 
 // 「求人詳細ページっぽい」URLパターン
+// ATS(Talentio/HRMOS/Wantedly/HERP) だけでなく、企業HP自前の個別職種ページも対象に含める
+// (例: cybozu.co.jp/recruit/job/engineering.html, example.com/careers/engineer/)
 const JOB_DETAIL_PATTERNS = [
   /open\.talentio\.com\/r\/[^/]+\/c\/[^/]+\/pages\/\d+/i,
   /talentio\.com\/[^/]+\/pages\/\d+/i,
   /hrmos\.co\/pages\/[^/]+\/jobs\/\d+/i,
   /wantedly\.com\/projects\/\d+/i,
   /herp\.careers\/v\d+\/[^/]+\/[^/]+/i,
+  // HP内の職種別詳細ページ: /recruit/job/XXX / /careers/YYY/ / /saiyou/jobs/ZZZ 等
+  // 末尾が /index 以外のパスセグメントまたは .html で終わるもの
+  /\/(recruit|careers?|saiyou?|hiring|jobs?)\/(job|position|occupation|role)\/[a-z0-9-]+/i,
+  /\/(recruit|careers?)\/[a-z0-9-]+\.html?$/i,
 ];
 
 function getGenAI() {
@@ -484,9 +490,13 @@ function sortByPriority(urls: string[]): string[] {
   return [...urls].sort((a, b) => rank(a) - rank(b));
 }
 
-// www./非www./末尾スラッシュ違いを正規化（同一ページのURL変種を束ねるため）
+// www./非www./末尾スラッシュ違い/アンカーフラグメントを正規化（同一ページのURL変種を束ねるため）
 function normalizeUrl(url: string): string {
-  return url.replace(/^https?:\/\/(www\.)?/i, "https://").toLowerCase().replace(/\/+$/, "");
+  return url
+    .replace(/^https?:\/\/(www\.)?/i, "https://")
+    .replace(/#.*$/, "") // アンカー(#section) 除去。同一ページなので
+    .toLowerCase()
+    .replace(/\/+$/, "");
 }
 function dedupeUrls(urls: string[]): string[] {
   const seen = new Set<string>();
@@ -552,7 +562,9 @@ function extractUrls(text: string): string[] {
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
     let u = m[1].replace(/[.,)、。」]+$/, "");
-    out.add(u);
+    // アンカー除去 (同一ページの重複取得を避ける)
+    u = u.replace(/#.*$/, "");
+    if (u) out.add(u);
   }
   return [...out];
 }
@@ -1464,7 +1476,8 @@ export async function POST(req: NextRequest) {
       // Stage1.5 の HTML 抽出で見つけた /homes/XXX, /pages/XXX も Stage2 候補に入れる
       for (const u of stage1AtsHtmlPages) addIfUsable(u);
       crawlDebug.stage2.extracted["__stage1_html__"] = stage1AtsHtmlPages;
-      const stage2Candidates = sortByPriority([...discovered]).slice(0, 4);
+      // 最大12件に拡大: 複数ポジションを持つ企業のために個別職種ページまで取り込む余地を確保
+      const stage2Candidates = sortByPriority([...discovered]).slice(0, 12);
       crawlDebug.stage2.candidates = stage2Candidates;
       if (stage2Candidates.length > 0) {
         console.log(`[crawl] Stage2: Stage1本文から${stage2Candidates.length}件の追加URLを発見`);
@@ -1527,7 +1540,8 @@ export async function POST(req: NextRequest) {
             stage3Discovered.add(u);
           }
         }
-        const stage3Candidates = [...stage3Discovered].slice(0, 3);
+        // 最大8件に拡大: ATS/企業HPの個別求人詳細まで広く拾う
+        const stage3Candidates = [...stage3Discovered].slice(0, 8);
         crawlDebug.stage3.candidates = stage3Candidates;
         if (stage3Candidates.length > 0) {
           console.log(`[crawl] Stage3: 個別求人詳細URL ${stage3Candidates.length}件`);
@@ -1662,16 +1676,36 @@ export async function POST(req: NextRequest) {
         workConditions: jobData.workConditions || {},
         selection: jobData.selection || {},
       });
-      for (const pos of uniqueDetected.slice(1, 8)) {
-        allPositions.push({
-          jobTitle: pos,
-          summary: "",
-          jobContent: {},
-          requirements: {},
-          salary: {},
-          workConditions: {},
-          selection: {},
-        });
+
+      // サブポジションも並列で実際に生成 (以前は空オブジェクトだったため求職者に情報が届いてなかった)
+      // 各ポジションで merged 全文を渡し focusHint で絞らせる。60k字に切り詰めてトークン抑制。
+      const subPositions = uniqueDetected.slice(1, 8);
+      const subSource = merged.slice(0, 60000);
+      console.log(`[sub-positions] ${subPositions.length}件を並列生成: ${JSON.stringify(subPositions)}`);
+      const subResults = await Promise.allSettled(
+        subPositions.map((pos) =>
+          generatePositionPart(ai, companyName, pos, salary, subSource, pos)
+            .then((r) => ({ pos, data: r.data, usage: r.usage }))
+            .catch((e) => {
+              console.log(`[sub-positions] ${pos} 失敗: ${e.message}`);
+              return { pos, data: {} as any, usage: {} as any };
+            })
+        )
+      );
+      for (const r of subResults) {
+        if (r.status === "fulfilled") {
+          const { pos, data, usage } = r.value;
+          subPositionUsages.push(usage);
+          allPositions.push({
+            jobTitle: pos,
+            summary: data.summary || "",
+            jobContent: data.jobContent || {},
+            requirements: data.requirements || {},
+            salary: data.salary || {},
+            workConditions: data.workConditions || {},
+            selection: data.selection || {},
+          });
+        }
       }
     }
 
