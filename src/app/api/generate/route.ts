@@ -179,15 +179,19 @@ async function detectPositionsWithGemini(
   }
 }
 
-const GENERATION_INSTRUCTION = `あなたは求人票作成の専門家です。与えられた「採用ページ全文テキスト」から、採用ホームページと同等の情報密度で求人票JSONを生成してください。
+const GENERATION_INSTRUCTION = `あなたは求人票作成の専門家です。与えられた「採用ページ全文テキスト」（複数ページの結合）から、talentio/wantedly レベルの詳細な求人票JSONを生成してください。
+
+【目標レベル】
+open.talentio.com などの詳細求人票と同等の情報密度。業務内容は10項目以上、福利厚生は15項目以上、会社情報は事業/MVV/カルチャー/代表メッセージを含む豊富な内容にする。
 
 【最重要】
 - 原文に書かれている情報は**一切省略せず全て**JSONに反映する
 - 箇条書き項目は全て転記する（「など」で端折らない）
 - 数値・固有名詞・制度名は原文通りに転記する
 - 情報がない項目は値を "情報なし" にする（フロントで自動非表示にする）
-- 雛形にないキーは自由に追加してよい（例: "代表メッセージ", "選考フロー", "1日のスケジュール", "一日の流れ"）
+- 雛形にないキーは自由に追加してよい（例: "代表メッセージ", "選考フロー", "1日のスケジュール", "チーム構成", "技術スタック", "使用ツール", "評価制度"）
 - 業務内容・福利厚生は原文に出てくる全項目を**個別キーに分けて**列挙する
+- 複数ページのソースがある場合、全ページから情報を統合する
 
 【JSON値のフォーマット規則 - 絶対厳守】
 - **各セクションの値は必ず「文字列」で返す**（配列・ネストオブジェクト禁止）
@@ -195,14 +199,15 @@ const GENERATION_INSTRUCTION = `あなたは求人票作成の専門家です。
 - 箇条書きを1つのキーに入れる場合は改行区切りの文字列（"・項目1\\n・項目2\\n・項目3"）
 - 給与の内訳のような階層情報も、個別キーに展開する（例: "固定時間外手当", "固定深夜手当", "年俸月額"）
 
-【項目数のミニマム】
-- companyInfo: 8項目以上（MVV / 事業 / 特徴 / 代表メッセージ / カルチャー等）
-- jobContent: 業務内容だけで5〜15項目（"主な業務内容1"～"主な業務内容N"）+ 業務の流れ / 配属 / キャリアパス
-- requirements: 必須3項目 + 歓迎3項目以上 + 求める人物像
-- salary: 8項目以上（年収 / 月給 / 固定時間外手当 / 固定深夜手当 / 昇給 / 賞与 / 諸手当 等）
-- workConditions: 7項目以上
-- holidays: 5項目以上
-- benefits: 10項目以上（社会保険 / 健康 / 住宅 / 育児 / スキルアップ / 食事 / レクリエーション 等、独自制度は全て個別キー化）
+【項目数のミニマム（talentio水準）】
+- basicInfo: 5項目以上
+- companyInfo: **12項目以上**（事業内容1〜N / ミッション / ビジョン / バリュー / 特徴 / 強み / 設立 / 従業員数 / 資本金 / 本社 / 代表メッセージ / カルチャー）
+- jobContent: **業務内容10〜20項目**（"主な業務内容1"〜"主な業務内容N"）+ 業務の流れ / チーム構成 / 配属 / キャリアパス / 将来性 / 技術スタック / 使用ツール
+- requirements: 必須5項目 + 歓迎5項目 + 求める人物像 + 年齢 + 学歴（最低10項目）
+- salary: **10項目以上**（基本給 / 想定年収 / 年俸月額 / 固定時間外手当 / 固定深夜手当 / 昇給 / 賞与 / 諸手当1〜N / 給与モデル例 等）
+- workConditions: **10項目以上**（勤務地 / 住所 / アクセス / 勤務時間 / コアタイム / リモート可否 / 頻度 / 残業時間 / 試用期間 / 転勤 / 服装）
+- holidays: 7項目以上（年間休日数 / 週休 / 有給 / 特別休暇1〜N / 長期休暇 / 育児休暇 等）
+- benefits: **15項目以上**（社会保険 / 退職金 / 健康診断 / ジム / 食事 / 在宅手当 / 通勤 / 住宅 / 育児 / 介護 / スキル / 書籍 / 研修 / レクリエーション / 独自制度1〜N）
 
 【禁止事項】
 - 要約・言い換え
@@ -213,7 +218,8 @@ const GENERATION_INSTRUCTION = `あなたは求人票作成の専門家です。
 【品質基準】
 - 1項目20〜300文字、具体的数値・固有名詞を含む
 - 年収・残業時間・年間休日は必ず数値で記載
-- MVV・事業内容・代表メッセージ・カルチャーも企業情報に含める`;
+- MVV・事業内容・代表メッセージ・カルチャーも企業情報に含める
+- 複数ソースから得た情報は全て統合し、重複は1つにまとめる`;
 
 const JOB_SCHEMA_HINT = `
 {
@@ -264,10 +270,10 @@ async function generateJobJsonWithGemini(
       config: {
         responseMimeType: "application/json",
         temperature: 0.2,
-        maxOutputTokens: 10000,
+        maxOutputTokens: 14000,
       },
     }),
-    35000,
+    38000,
     "Gemini(求人票生成)"
   );
 
@@ -338,21 +344,19 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Step 2: Jina Reader で全文Markdown取得（1件取れたら即終了で時短）
-    console.log(`[fetch] Jina Readerで取得: 候補${targetUrls.length}件`);
+    // Step 2: Jina Reader で全文Markdown取得（並列で全URL同時取得、情報量最大化）
+    const fetchCandidates = targetUrls.slice(0, 4);
+    console.log(`[fetch] Jina Readerで並列取得: ${fetchCandidates.length}件`);
+    const fetchResults = await Promise.allSettled(
+      fetchCandidates.map((url) => fetchJinaReader(url, 13000).then((text) => ({ url, text })))
+    );
     const contents: { url: string; text: string }[] = [];
-    for (const url of targetUrls.slice(0, 3)) {
-      try {
-        const text = await fetchJinaReader(url, 12000);
-        if (text && text.length > 200) {
-          contents.push({ url, text });
-          console.log(`  ✓ ${url} (${text.length}文字)`);
-          break; // 1件成功したら十分。複数URLはタイムアウトの原因になるため切る
-        } else {
-          console.log(`  ✗ ${url} (短すぎ: ${text?.length || 0}文字)`);
-        }
-      } catch (e: any) {
-        console.log(`  ✗ ${url}: ${e.message}`);
+    for (const r of fetchResults) {
+      if (r.status === "fulfilled" && r.value.text && r.value.text.length > 200) {
+        contents.push(r.value);
+        console.log(`  ✓ ${r.value.url} (${r.value.text.length}文字)`);
+      } else if (r.status === "rejected") {
+        console.log(`  ✗ ${r.reason?.message || r.reason}`);
       }
     }
 
@@ -362,8 +366,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Gemini入力は35000文字まで（60秒制限内に収める）
-    const MAX_CHARS = 35000;
+    // Gemini入力は55000文字まで（並列取得なので複数ソースの情報を盛り込める）
+    const MAX_CHARS = 55000;
     let merged = contents.map((c) => `=== ${c.url} ===\n${c.text}`).join("\n\n");
     if (merged.length > MAX_CHARS) merged = merged.slice(0, MAX_CHARS);
 
