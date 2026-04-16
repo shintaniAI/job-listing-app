@@ -2121,6 +2121,10 @@ export async function POST(req: NextRequest) {
         total_jpy_approx: +(totalUSD * usdToJpy).toFixed(3),
       },
       crawl: crawlDebug,
+      primary_url: recruitmentSorted[0]?.url,
+      primary_len: recruitmentSorted[0]?.text.length,
+      // 給与/選考/休日が空になる問題の診断用: PRIMARYの冒頭2000字を公開
+      primary_head: recruitmentSorted[0]?.text?.slice(0, 2000) || "",
     };
 
     console.log(
