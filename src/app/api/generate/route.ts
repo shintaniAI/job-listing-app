@@ -284,6 +284,19 @@ function isPreferredHost(url: string): boolean {
   return PREFERRED_HOSTS.some((h) => lower.includes(h));
 }
 
+// 採用ページと見なせるURLか（ATSホスト / 会社HPの採用セクション / 採用系パス）
+// 「採用ページ必ず最優先」判定に使う。isJobDetailUrl より広い定義。
+function isRecruitmentPage(url: string): boolean {
+  if (isJobDetailUrl(url)) return true;
+  if (isKnownAtsHost(url)) return true;
+  try {
+    const p = new URL(url).pathname.toLowerCase();
+    // 典型的な採用ページパス: /recruit /careers /career /saiyo /saiyou /jobs /job /hiring /job-openings /recruitment
+    if (/\/(recruit|careers?|saiyou?|jobs?|hiring|job-openings?|recruitment)(\/|$)/i.test(p)) return true;
+  } catch {}
+  return false;
+}
+
 // 既知の採用管理サービス(ATS)のホスト。/recruit/ 等のパス断片は含めない厳格判定。
 const KNOWN_ATS_HOSTS = [
   "open.talentio.com",
@@ -608,21 +621,28 @@ async function findOfficialUrlWithGemini(
     "",
     `Google検索でこの会社の公式URL群を見つけてください。${jobClause}`,
     "",
+    "【最重要目的】",
+    "**採用ページを必ず見つけること**。採用ページ(ATS個別求人/ATS企業ルート/会社HPの/careers・/recruit)は応募者に提示する求人票の正本となるため、どんな形式であれ1つ以上必ず含めること。",
+    "",
     "【絶対遵守】",
     `- 社名が「${companyName}」と完全一致する企業のURLのみ出力する`,
     "- 似た社名、違う会社、関連しない会社のURLは絶対に含めない",
     "- 検索結果が無い/自信が無い場合は空出力する（間違ったURLを返すより空の方が良い）",
     "",
     "【検索ヒント：これらのクエリを内部で試してOK】",
-    `- "${companyName}" 公式サイト`,
     `- "${companyName}" 採用 OR recruit OR careers`,
-    `- "${companyName}" site:talentio.com OR site:hrmos.co OR site:wantedly.com`,
+    `- "${companyName}" 採用情報 OR 募集要項 OR 職務内容`,
+    `- "${companyName}" site:talentio.com OR site:hrmos.co OR site:wantedly.com OR site:herp.careers`,
+    `- "${companyName}" site:indeed.com OR site:doda.jp OR site:mynavi.jp OR site:rikunabi.com OR site:en-japan.com`,
+    `- "${companyName}" 公式サイト`,
     `- "${companyName}" 会社概要 事業内容`,
     "",
     "【出力したいURL（優先度順）】",
-    "- 求人詳細ページ（Talentio/HRMOS/Wantedly/Herpの個別URL＝最優先）",
-    "- 会社公式サイト（ホーム・採用・会社概要・MVV）",
-    "- 求人媒体の該当企業ページ（Indeed/doda/マイナビ転職/リクナビNEXT/エン転職/Green/type/ビズリーチ等）も補助ソースとして出してよい",
+    "1. 求人詳細ページ（Talentio/HRMOS/Wantedly/Herpの個別URL）＝最優先",
+    "2. ATS企業ルート（open.talentio.com/r/../c/../ や hrmos.co/pages/.. など個別URLがなければ必須）",
+    "3. 会社公式サイトの採用/キャリアページ（/careers/ /recruit/ /saiyou/ 等）",
+    "4. 求人媒体の該当企業ページ（Indeed/doda/マイナビ転職/リクナビNEXT/エン転職/Green/type/ビズリーチ等）",
+    "5. 会社公式サイト（ホーム・会社概要・MVV）＝補助情報用",
     "",
     "見つけたURLを全てhttps://付きで1行ずつ出力（最大12件）。説明・番号・記号不要。",
   ].join("\n");
@@ -743,8 +763,8 @@ async function detectPositionsWithGemini(
 
 // ====== プロンプト（talentio/HRMOS 実物ベースに再設計） ======
 const COMMON_RULES = `【絶対ルール】
-- **最優先**: 「=== PRIMARY SOURCE (正本／...)」タグが付いたソースがあればそれを**正本**とし、原文の情報を漏らさず転記する。タグがない場合は先頭の「=== SOURCE URL: ...」を正本とみなす
-- 「=== 補助ソース:」および2件目以降のSOURCE URLは、正本で欠けている項目を埋める用途のみに使う（正本を上書きしない）
+- **採用ページ最優先・網羅**: 「=== PRIMARY SOURCE (採用ページ／...)」タグが付いたソースは採用ページである。そこに書かれている情報は項目として**全て漏らさず**JSONに転記する（章・見出し・箇条書き・表・制度一覧・数値・金額・時間帯など全て）。タグがない場合は先頭の「=== SOURCE URL: ...」を採用ページとみなす
+- **HP等は追加情報として取り込む**: 「=== 補助ソース:」(HP・会社概要・求人媒体等)および2件目以降のSOURCE URLは、**採用ページを補完する追加情報**として扱う。採用ページに無い情報(会社概要・MVV・事業詳細・代表メッセージ・沿革 等)があれば積極的に取り込み、既存キーの補足や新しいキーの追加に使ってよい。ただし採用ページに書いてある項目の値を補助ソースの内容で上書きしてはいけない
 - 原文の章見出し（「求人概要」「職務内容」「応募資格」「報酬」「諸手当」「休日・休暇」「福利厚生」「事業概要」「ミッション」「ビジョン」「バリュー」「カルチャー」等）を全てカバーする
 - 数値・固有名詞・制度名・金額・時間帯・時間数は**原文通りに**転記（改変・丸め・言い換え禁止）
 - 情報がない項目は値を空文字列 "" にする（"情報なし"等の文字列を入れない）
@@ -765,7 +785,7 @@ const COMMON_RULES = `【絶対ルール】
 - **推測・創作・要約・短縮は完全禁止**。提供された原文（公式採用ページ・求人媒体含む）に書かれていないことは絶対に書かない／書かれていることを端折らない
 
 【ソースの扱い】
-- 求人媒体（Indeed/doda/マイナビ転職/リクナビNEXT/エン転職/Green/type/ビズリーチ等）もソースに含まれる場合は参照OK。ただし正本タグが付いた公式ページが最優先で、媒体の情報は正本で欠けている項目の補完に使う
+- 採用ページ(PRIMARY)は全て転記。HP/会社概要/求人媒体(Indeed/doda/マイナビ転職/リクナビNEXT/エン転職/Green/type/ビズリーチ等)は追加情報源として、採用ページに無い事実があれば追加する
 - 原文が長い場合は値が長くなっても省略しない（読みやすさのため段落分けや改行は入れてよい）`;
 
 // パートA: 企業全体情報
@@ -1334,36 +1354,43 @@ export async function POST(req: NextRequest) {
     scored.sort((a, b) => b.score - a.score);
 
     const MAX_CHARS = 80000;
-    const topSource = scored[0];
-    const topIsDetail = isJobDetailUrl(topSource.url);
-    const hasRichPrimary = topIsDetail && topSource.text.length > 3000;
+    // 採用ページを最優先ソースに固定: 求人詳細URLが無くてもATSや/careers/等ならPRIMARY扱い
+    const recruitmentSorted = [...scored].sort((a, b) => {
+      const ar = isRecruitmentPage(a.url) ? 0 : 1;
+      const br = isRecruitmentPage(b.url) ? 0 : 1;
+      if (ar !== br) return ar - br;
+      return b.score - a.score;
+    });
+    const topSource = recruitmentSorted[0];
+    const topIsRecruitment = isRecruitmentPage(topSource.url);
+    const hasRichPrimary = topIsRecruitment && topSource.text.length > 2000;
 
     let merged: string;
     if (hasRichPrimary) {
-      // 正本(Talentio/HRMOS等)が十分リッチ → 60k を正本に割り当て、残り20kを補助に分配
+      // 採用ページが取得できた → PRIMARY扱いで60k、HP等の補助ソースは20kを分配
       const PRIMARY_BUDGET = 60000;
       const OTHER_BUDGET = 20000;
       const primaryText = topSource.text.slice(0, PRIMARY_BUDGET);
-      const others = scored.slice(1, 5);
+      const others = recruitmentSorted.slice(1, 5);
       const perOther = others.length > 0 ? Math.floor(OTHER_BUDGET / others.length) : 0;
       const othersBlock = others
-        .map((c) => `=== 補助ソース: ${c.url} ===\n${c.text.slice(0, perOther)}`)
+        .map((c) => `=== 補助ソース (HP等／採用ページに無い追加情報用): ${c.url} ===\n${c.text.slice(0, perOther)}`)
         .join("\n\n---\n\n");
       merged =
-        `=== PRIMARY SOURCE (正本／このソースを最優先で逐語転記): ${topSource.url} ===\n${primaryText}` +
+        `=== PRIMARY SOURCE (採用ページ／このソースの情報を全て網羅的に転記): ${topSource.url} ===\n${primaryText}` +
         (othersBlock ? `\n\n---\n\n${othersBlock}` : "");
       if (merged.length > MAX_CHARS) merged = merged.slice(0, MAX_CHARS);
       console.log(
-        `[fetch] 正本モード: PRIMARY=${topSource.url}(${primaryText.length}字) / 補助=${others.length}件`
+        `[fetch] 採用ページPRIMARYモード: PRIMARY=${topSource.url}(${primaryText.length}字) / 補助=${others.length}件`
       );
     } else {
-      // リッチな正本なし → 均等配分（スコア降順で上位6件を結合）
+      // 採用ページが見つからず/薄い → スコア降順で均等配分
       merged = scored
         .slice(0, 6)
         .map((c) => `=== SOURCE URL: ${c.url} ===\n${c.text}`)
         .join("\n\n---\n\n");
       if (merged.length > MAX_CHARS) merged = merged.slice(0, MAX_CHARS);
-      console.log(`[fetch] 均等配分モード: ${Math.min(scored.length, 6)}件結合`);
+      console.log(`[fetch] 均等配分モード(採用ページ未取得): ${Math.min(scored.length, 6)}件結合`);
     }
     console.log(`[fetch] 最終ソース数: ${contents.length}件 / ${merged.length}文字`);
 
