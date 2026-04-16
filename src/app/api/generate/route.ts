@@ -153,82 +153,126 @@ async function guessUrlsWithoutGrounding(
   return { urls: urls.slice(0, 6), usage: (result as any).usageMetadata || {} };
 }
 
-// ---------- Gemini + Google Search で公式採用URLを探す（多角クエリ） ----------
+// 1本のGrounded検索を実行してURLを抽出（失敗時は空配列）
+async function runGroundedSearch(
+  ai: GoogleGenAI,
+  prompt: string,
+  timeoutMs: number,
+  label: string
+): Promise<{ urls: string[]; usage: any }> {
+  try {
+    const result = await withTimeout(
+      ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: prompt,
+        config: { tools: [{ googleSearch: {} }], temperature: 0 },
+      }),
+      timeoutMs,
+      `Gemini(${label})`
+    );
+    const text = result.text || "";
+    const direct = text
+      .split(/\r?\n/)
+      .map((l: string) => l.trim())
+      .filter((l: string) => /^https?:\/\//.test(l))
+      .filter((l: string) => !isBlockedUrl(l));
+
+    const grounded: string[] = [];
+    try {
+      const candidates: any[] = (result as any).candidates || [];
+      for (const c of candidates) {
+        const chunks = c?.groundingMetadata?.groundingChunks || [];
+        for (const ch of chunks) {
+          const u = ch?.web?.uri;
+          if (u && /^https?:\/\//.test(u) && !isBlockedUrl(u)) grounded.push(u);
+        }
+      }
+    } catch {}
+
+    return {
+      urls: Array.from(new Set([...direct, ...grounded])),
+      usage: (result as any).usageMetadata || {},
+    };
+  } catch (e: any) {
+    console.log(`[search] ${label} 失敗: ${e.message}`);
+    return { urls: [], usage: {} };
+  }
+}
+
+// ---------- Gemini + Google Search で公式採用URLを探す（複線検索） ----------
+// A) ATS詳細ページ検索（Talentio/HRMOS/Wantedly/Herp の個別求人URL）
+// B) 企業サイト検索（公式採用TOP、会社概要、MVV、福利厚生）
+// C) 知識ベース推測（Groundingで拾えない場合の保険として常時併走）
 async function findOfficialUrlWithGemini(
   ai: GoogleGenAI,
   companyName: string,
   jobTitle: string
 ): Promise<{ urls: string[]; usage: any }> {
-  const jobClause = jobTitle ? `特に「${jobTitle}」の職種ページがあれば最優先。` : "";
-  const prompt = [
-    `「${companyName}」の求人票を作成するため、公式の採用関連URLをできるだけ多く集めてください。${jobClause}`,
+  const jobClause = jobTitle ? `特に「${jobTitle}」の個別求人ページがあれば最優先。` : "";
+
+  const atsPrompt = [
+    `「${companyName}」の**求人詳細ページ**（個別求人のURL）をGoogle検索で探してください。${jobClause}`,
     "",
-    "【最優先で見つけたいURL（求人詳細ページ）】",
-    `- open.talentio.com/r/.../c/.../pages/NNNNNN の形式の個別求人ページ`,
-    `- hrmos.co/pages/.../jobs/NNNNNN の形式の個別求人ページ`,
-    `- wantedly.com/projects/NNNNNN の形式の個別募集ページ`,
-    `- herp.careers/v1/.../.../ の形式の個別求人ページ`,
-    `- 会社独自の /careers/jobs/... /recruit/jobs/... 個別求人ページ`,
-    `※ ルートURLだけでなく、個別求人の詳細ページURLを最大6件集めること。`,
+    "【必ず個別求人IDを含むURLを探す】",
+    `- site:open.talentio.com 形式: /r/{n}/c/{slug}/pages/{数字ID}`,
+    `- site:hrmos.co 形式: /pages/{slug}/jobs/{数字ID}`,
+    `- site:www.wantedly.com 形式: /projects/{数字ID}`,
+    `- site:herp.careers 形式: /v1/{slug}/{slug}`,
+    `- 会社独自ドメイン: /careers/jobs/{id} /recruit/jobs/{id} の個別求人`,
     "",
-    "【次点で欲しいURL】",
-    `- 公式の採用/キャリアページ（トップ）`,
-    `- 会社概要・事業内容・ミッション/ビジョン/バリュー（MVV）ページ`,
-    `- プレスリリース・企業ブログ（採用や文化に関するもの）`,
+    "※トップやカテゴリページ（例: /recruit/ だけ）はNG。**必ず個別求人ID付きURL**を集める",
+    "※複数職種があれば全ての個別求人URLを集める",
     "",
-    "【絶対に含めてはいけない（求人媒体）】",
+    "【除外（求人媒体）】",
     BLOCKED_SITES.map((s) => `  - ${s}`).join("\n"),
     "",
-    "URLだけを1行ずつ**最大12件**出力。説明・番号・マークダウン記法は一切不要。",
+    "URLのみ1行ずつ最大8件。説明・番号不要。",
   ].join("\n");
 
-  // Grounded検索 (最大18秒、タイムアウト時はフォールバックへ)
-  let result: any;
-  try {
-    result = await withTimeout(
-      ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: prompt,
-        config: {
-          tools: [{ googleSearch: {} }],
-          temperature: 0,
-        },
-      }),
-      18000,
-      "Gemini(URL検索)"
-    );
-  } catch (e: any) {
-    console.log(`[search] grounding失敗 (${e.message}), フォールバックへ`);
-    const fb = await guessUrlsWithoutGrounding(ai, companyName).catch(() => ({
+  const corpPrompt = [
+    `「${companyName}」の**公式サイト内**の採用／会社紹介ページをGoogle検索で探してください。`,
+    "",
+    "【集めて欲しいページ】",
+    "- 公式の採用／キャリア／リクルートページ（トップ・募集要項）",
+    "- 会社概要・事業内容ページ",
+    "- ミッション／ビジョン／バリュー（MVV）・経営理念ページ",
+    "- 福利厚生・働く環境・制度紹介ページ",
+    "- 代表メッセージ・社員インタビュー・カルチャー紹介",
+    "",
+    "【除外（求人媒体）】",
+    BLOCKED_SITES.map((s) => `  - ${s}`).join("\n"),
+    "",
+    "URLのみ1行ずつ最大8件。",
+  ].join("\n");
+
+  const [atsRes, corpRes, guessRes] = await Promise.all([
+    runGroundedSearch(ai, atsPrompt, 12000, "ATS詳細検索"),
+    runGroundedSearch(ai, corpPrompt, 12000, "企業サイト検索"),
+    guessUrlsWithoutGrounding(ai, companyName).catch(() => ({
       urls: [] as string[],
       usage: {},
-    }));
-    return fb;
-  }
+    })),
+  ]);
 
-  const text = result.text || "";
-  const urls = text
-    .split(/\r?\n/)
-    .map((l: string) => l.trim())
-    .filter((l: string) => /^https?:\/\//.test(l))
-    .filter((l: string) => !isBlockedUrl(l));
-
-  // grounding metadata からも取る
-  const grounded: string[] = [];
-  try {
-    const candidates: any[] = (result as any).candidates || [];
-    for (const c of candidates) {
-      const chunks = c?.groundingMetadata?.groundingChunks || [];
-      for (const ch of chunks) {
-        const u = ch?.web?.uri;
-        if (u && /^https?:\/\//.test(u) && !isBlockedUrl(u)) grounded.push(u);
-      }
-    }
-  } catch {}
-
-  const merged = Array.from(new Set([...urls, ...grounded]));
+  const merged = Array.from(
+    new Set([...atsRes.urls, ...corpRes.urls, ...guessRes.urls])
+  );
   const sorted = sortByPriority(merged);
-  const usage = (result as any).usageMetadata || {};
+  console.log(
+    `[search] ATS:${atsRes.urls.length} 企業:${corpRes.urls.length} 推測:${guessRes.urls.length} → 統合${sorted.length}件`
+  );
+
+  const usage = {
+    promptTokenCount:
+      (atsRes.usage?.promptTokenCount || 0) +
+      (corpRes.usage?.promptTokenCount || 0) +
+      ((guessRes as any).usage?.promptTokenCount || 0),
+    candidatesTokenCount:
+      (atsRes.usage?.candidatesTokenCount || 0) +
+      (corpRes.usage?.candidatesTokenCount || 0) +
+      ((guessRes as any).usage?.candidatesTokenCount || 0),
+  };
+
   return { urls: sorted.slice(0, 12), usage };
 }
 
@@ -279,7 +323,8 @@ async function detectPositionsWithGemini(
 
 // ====== プロンプト（talentio/HRMOS 実物ベースに再設計） ======
 const COMMON_RULES = `【絶対ルール】
-- **最優先**: 先頭に記載された「=== SOURCE URL: ...」の最初のソース（通常はTalentio/HRMOS/Wantedly等の求人詳細ページ）を**正本**として扱い、その原文を**ほぼ逐語的に**全てJSONへ転記する
+- **最優先**: 「=== PRIMARY SOURCE (正本／...)」というタグが付いたソースがあれば、それを**正本**として扱い原文をほぼ逐語的に全てJSONへ転記する。タグがない場合は先頭の「=== SOURCE URL: ...」を正本とみなす
+- 「=== 補助ソース:」および2件目以降のSOURCE URLは、正本で欠けている項目を埋める用途のみに使う（正本の内容を上書きしない）
 - 原文の章見出し（「求人概要」「職務内容」「応募資格」「報酬」「諸手当」「休日・休暇」「福利厚生」「事業概要」「ミッション」「ビジョン」「バリュー」「カルチャー」等）を全てカバーする
 - 箇条書き・表・制度一覧は1項目ずつ個別キーに分けて転記する（「など」で端折らない／まとめない）
 - 数値・固有名詞・制度名・金額・時間帯・時間数は**原文通りに**転記（改変・丸め・言い換え禁止）
@@ -412,7 +457,7 @@ async function generateCompanyPart(
         thinkingConfig: { thinkingBudget: 0 },
       } as any,
     }),
-    42000,
+    38000,
     "Gemini(企業パート生成)"
   );
 
@@ -461,7 +506,7 @@ async function generatePositionPart(
         thinkingConfig: { thinkingBudget: 0 },
       } as any,
     }),
-    42000,
+    38000,
     "Gemini(ポジションパート生成)"
   );
 
@@ -605,7 +650,7 @@ export async function POST(req: NextRequest) {
     const MIN_TEXT_LEN = 150;
 
     const fetchResults = await Promise.allSettled(
-      fetchCandidates.map((url) => fetchJinaReader(url, 12000).then((text) => ({ url, text })))
+      fetchCandidates.map((url) => fetchJinaReader(url, 10000).then((text) => ({ url, text })))
     );
     for (const r of fetchResults) {
       if (r.status === "fulfilled" && r.value.text && r.value.text.length > MIN_TEXT_LEN) {
@@ -621,7 +666,7 @@ export async function POST(req: NextRequest) {
       console.log(`[fetch] 並列全失敗、直列フォールバック`);
       for (const url of fetchCandidates) {
         try {
-          const text = await fetchJinaReader(url, 18000);
+          const text = await fetchJinaReader(url, 15000);
           if (text && text.length > MIN_TEXT_LEN) {
             contents.push({ url, text });
             console.log(`  ✓ (serial) ${url} (${text.length}文字)`);
@@ -639,17 +684,49 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Gemini入力: 最大80000文字、求人詳細ページを先頭に
+    // ---------- content-aware ランキング & 予算配分 ----------
+    // スコア: 求人詳細ページ(1e6) >> 公式採用媒体ホスト(1e4) >> 本文長
+    const scored = contents.map((c) => ({
+      ...c,
+      score:
+        (isJobDetailUrl(c.url) ? 1_000_000 : 0) +
+        (isPreferredHost(c.url) ? 10_000 : 0) +
+        c.text.length,
+    }));
+    scored.sort((a, b) => b.score - a.score);
+
     const MAX_CHARS = 80000;
-    const sortedContents = [...contents].sort((a, b) => {
-      const ap = isJobDetailUrl(a.url) ? 0 : isPreferredHost(a.url) ? 1 : 2;
-      const bp = isJobDetailUrl(b.url) ? 0 : isPreferredHost(b.url) ? 1 : 2;
-      return ap - bp;
-    });
-    let merged = sortedContents
-      .map((c) => `=== SOURCE URL: ${c.url} ===\n${c.text}`)
-      .join("\n\n---\n\n");
-    if (merged.length > MAX_CHARS) merged = merged.slice(0, MAX_CHARS);
+    const topSource = scored[0];
+    const topIsDetail = isJobDetailUrl(topSource.url);
+    const hasRichPrimary = topIsDetail && topSource.text.length > 3000;
+
+    let merged: string;
+    if (hasRichPrimary) {
+      // 正本(Talentio/HRMOS等)が十分リッチ → 60k を正本に割り当て、残り20kを補助に分配
+      const PRIMARY_BUDGET = 60000;
+      const OTHER_BUDGET = 20000;
+      const primaryText = topSource.text.slice(0, PRIMARY_BUDGET);
+      const others = scored.slice(1, 5);
+      const perOther = others.length > 0 ? Math.floor(OTHER_BUDGET / others.length) : 0;
+      const othersBlock = others
+        .map((c) => `=== 補助ソース: ${c.url} ===\n${c.text.slice(0, perOther)}`)
+        .join("\n\n---\n\n");
+      merged =
+        `=== PRIMARY SOURCE (正本／このソースを最優先で逐語転記): ${topSource.url} ===\n${primaryText}` +
+        (othersBlock ? `\n\n---\n\n${othersBlock}` : "");
+      if (merged.length > MAX_CHARS) merged = merged.slice(0, MAX_CHARS);
+      console.log(
+        `[fetch] 正本モード: PRIMARY=${topSource.url}(${primaryText.length}字) / 補助=${others.length}件`
+      );
+    } else {
+      // リッチな正本なし → 均等配分（スコア降順で上位6件を結合）
+      merged = scored
+        .slice(0, 6)
+        .map((c) => `=== SOURCE URL: ${c.url} ===\n${c.text}`)
+        .join("\n\n---\n\n");
+      if (merged.length > MAX_CHARS) merged = merged.slice(0, MAX_CHARS);
+      console.log(`[fetch] 均等配分モード: ${Math.min(scored.length, 6)}件結合`);
+    }
     console.log(`[fetch] 最終ソース数: ${contents.length}件 / ${merged.length}文字`);
 
     // Step 3: 検出 + 2分割並列生成
