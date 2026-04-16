@@ -374,28 +374,33 @@ function extractRecruitmentLinksFromContent(text: string): string[] {
 }
 
 // フォールバック: Groundingを使わず知識ベースで具体URL推測（高速）
+// ATS URL (Talentio/HRMOS/Wantedly) はスラッグの幻覚を起こしやすい (オリゾ→gikou等) ため
+// ここでは HP 系のみ推測させ、ATS は grounded 側に任せる。
 async function guessUrlsWithoutGrounding(
   ai: GoogleGenAI,
   companyName: string
 ): Promise<{ urls: string[]; usage: any }> {
   const prompt = [
-    `「${companyName}」の以下URLを推測してください。プレースホルダ({slug}等)を残さず、会社名のローマ字化/略称を考慮して実在しそうな具体値に必ず埋めてください。`,
+    `「${companyName}」の以下URLを推測してください。プレースホルダ({slug}等)を残さず、実在しそうな具体値に埋めてください。`,
     "",
-    "【出して欲しい項目】",
+    "【重要: ローマ字化のルール】",
+    "- 会社名がカタカナ(例「オリゾ」)なら、そのカタカナをヘボン式で直接ローマ字化する (オリゾ→orizo)",
+    "- 漢字の音読み/訓読みを当てずっぽうで推測しない (オリゾを儀工/義工として『gikou』と読み替える等はNG)",
+    "- 会社名が漢字なら一般的な訓読み/音読みのローマ字化を試し、自信が無ければそのURLは出さない",
+    "",
+    "【出して欲しい項目 (HP系のみ)】",
     "1. 公式ウェブサイトのホームURL (例: https://<ローマ字ドメイン>.co.jp/ や .com/)",
     "2. 公式サイトの採用ページ (/careers/ /recruit/ /company/careers/ など)",
     "3. 公式サイトの会社概要ページ (/company/ /about/ など)",
-    "4. Talentio採用ページ (https://open.talentio.com/r/1/c/<会社スラッグ>/)",
-    "5. HRMOS採用ページ (https://hrmos.co/pages/<会社スラッグ>)",
-    "6. Wantedly企業ページ (https://www.wantedly.com/companies/<会社スラッグ>)",
     "",
-    "※ 不明でも推測して出力。後段で実在確認するので、間違っていてもOK。",
+    "※ Talentio/HRMOS/Wantedly等のATSページは推測しない（スラッグ幻覚防止のため）。これらは検索で探す。",
     "※ プレースホルダ({slug}, XXX等)を残したURLは絶対禁止。",
+    "※ 自信が無い場合は項目を出さなくて良い（空出力OK）。",
     "",
     "【除外】求人媒体:",
     BLOCKED_SITES.map((s) => `  - ${s}`).join("\n"),
     "",
-    "出力: URLのみ1行ずつ、最大8件。説明・番号・記号なし。",
+    "出力: URLのみ1行ずつ、最大5件。説明・番号・記号なし。",
   ].join("\n");
 
   try {
@@ -403,14 +408,15 @@ async function guessUrlsWithoutGrounding(
       ai.models.generateContent({
         model: "gemini-2.5-flash",
         contents: prompt,
-        config: { temperature: 0, maxOutputTokens: 600, thinkingConfig: { thinkingBudget: 0 } } as any,
+        config: { temperature: 0, maxOutputTokens: 400, thinkingConfig: { thinkingBudget: 0 } } as any,
       }),
       7000,
       "Gemini(URL推測)"
     );
     const urls = extractUrls(result.text || "")
       .filter((u) => !/\{[a-z_-]+\}/i.test(u)) // プレースホルダが残っているものは捨てる
-      .slice(0, 8);
+      .filter((u) => !isKnownAtsHost(u)) // ATS URL は推測しない方針（プロンプトで禁じてるが念押し）
+      .slice(0, 5);
     return { urls, usage: (result as any).usageMetadata || {} };
   } catch (e: any) {
     console.log(`[search] 知識ベース推測失敗: ${e.message}`);
@@ -486,12 +492,19 @@ async function findOfficialUrlWithGemini(
   const jobClause = jobTitle ? `特に「${jobTitle}」の個別求人ページがあれば最優先。` : "";
 
   const broadPrompt = [
-    `「${companyName}」の公式URL群をGoogle検索で見つけてください。${jobClause}`,
+    `対象企業: 「${companyName}」(この企業名と完全一致する会社のみ対象)`,
+    "",
+    `Google検索でこの会社の公式URL群を見つけてください。${jobClause}`,
+    "",
+    "【絶対遵守】",
+    `- 社名が「${companyName}」と完全一致する企業のURLのみ出力する`,
+    "- 似た社名、違う会社、関連しない会社のURLは絶対に含めない",
+    "- 検索結果が無い/自信が無い場合は空出力する（間違ったURLを返すより空の方が良い）",
     "",
     "【検索ヒント：これらのクエリを内部で試してOK】",
     `- "${companyName}" 公式サイト`,
     `- "${companyName}" 採用 OR recruit OR careers`,
-    `- "${companyName}" talentio OR hrmos OR wantedly`,
+    `- "${companyName}" site:talentio.com OR site:hrmos.co OR site:wantedly.com`,
     `- "${companyName}" 会社概要 事業内容`,
     "",
     "【出力したいURL】",
