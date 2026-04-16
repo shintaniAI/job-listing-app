@@ -11,6 +11,7 @@ type JobPosition = {
   requirements: Record<string, string>;
   salary: Record<string, string>;
   workConditions: Record<string, string>;
+  selection?: Record<string, string>;
 };
 
 type JobData = {
@@ -23,13 +24,14 @@ type JobData = {
   requirements: Record<string, string>;
   salary: Record<string, string>;
   workConditions: Record<string, string>;
+  selection?: Record<string, string>;
   holidays: Record<string, string>;
   benefits: Record<string, string>;
   positions?: JobPosition[];
   sources?: string[];
 };
 
-// 新しい8セクション定義
+// セクション定義（selection=選考プロセスを勤務条件の後に追加）
 const SECTION_DEFS: { key: keyof JobData; title: string }[] = [
   { key: "basicInfo", title: "1. 基本情報" },
   { key: "companyInfo", title: "2. 企業情報" },
@@ -37,8 +39,9 @@ const SECTION_DEFS: { key: keyof JobData; title: string }[] = [
   { key: "requirements", title: "4. 応募資格" },
   { key: "salary", title: "5. 給与・報酬" },
   { key: "workConditions", title: "6. 勤務条件" },
-  { key: "holidays", title: "7. 休日・休暇" },
-  { key: "benefits", title: "8. 福利厚生・待遇" },
+  { key: "selection", title: "7. 選考プロセス" },
+  { key: "holidays", title: "8. 休日・休暇" },
+  { key: "benefits", title: "9. 福利厚生・待遇" },
 ];
 
 // PDF生成用：値が空 or "情報なし" の行を除外
@@ -119,6 +122,7 @@ export default function Home() {
       requirements: p.requirements || result.requirements,
       salary: p.salary || result.salary,
       workConditions: p.workConditions || result.workConditions,
+      selection: p.selection || result.selection || {},
     };
   }, [result, activePositionIndex]);
 
@@ -164,6 +168,7 @@ export default function Home() {
         requirements: data.requirements || {},
         salary: data.salary || {},
         workConditions: data.workConditions || {},
+        selection: data.selection || {},
       };
       setResult({ ...result, positions: newPositions });
     } catch (err: any) {
@@ -226,7 +231,7 @@ export default function Home() {
       }
       if (!res.ok) throw new Error(data?.error || `エラーが発生しました (${res.status})`);
 
-      // 新しい8セクション構造に対応
+      // 9セクション構造(selection=選考プロセス追加)に対応
       setResult({
         companyName: data.companyName || "",
         jobTitle: data.jobTitle || "",
@@ -237,6 +242,7 @@ export default function Home() {
         requirements: data.requirements || {},
         salary: data.salary || {},
         workConditions: data.workConditions || {},
+        selection: data.selection || {},
         holidays: data.holidays || {},
         benefits: data.benefits || {},
         positions: Array.isArray(data.positions) ? data.positions : undefined,
@@ -421,10 +427,10 @@ export default function Home() {
     w.document.close();
   };
 
-  type SectionKey = "basicInfo" | "companyInfo" | "jobContent" | "requirements" | "salary" | "workConditions" | "holidays" | "benefits";
+  type SectionKey = "basicInfo" | "companyInfo" | "jobContent" | "requirements" | "salary" | "workConditions" | "selection" | "holidays" | "benefits";
 
   // ポジション固有のセクションキー
-  const POSITION_SECTIONS: SectionKey[] = ["jobContent", "requirements", "salary", "workConditions"];
+  const POSITION_SECTIONS: SectionKey[] = ["jobContent", "requirements", "salary", "workConditions", "selection"];
 
   const hasMultiplePositions = (r: JobData | null) =>
     !!r && Array.isArray(r.positions) && r.positions.length > 1;
@@ -496,10 +502,10 @@ export default function Home() {
     <main className="max-w-4xl mx-auto px-4 py-12">
       <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成アプリ v2.1</h1>
       <p className="text-center text-gray-600 mb-2">
-        企業の公式採用ページ（Talentio / HRMOS / Wantedly / 自社採用HP）を横断取得し、原文ベースで8セクションの求人票を生成します。
+        企業の公式採用ページ（Talentio / HRMOS / Wantedly / 自社採用HP）を優先取得し、HP・求人媒体（Indeed / doda / マイナビ転職 / リクナビNEXT / エン転職 等）も追加情報として参照して求人票を生成します。
       </p>
-      <p className="text-center text-sm text-red-600 mb-8">
-        ⚠ Indeed / doda / マイナビ転職 / リクナビNEXT / エン転職 等の求人媒体は参照しません
+      <p className="text-center text-sm text-gray-500 mb-8">
+        採用ページを正本として原文転記 → 不足情報をHP/媒体から補完
       </p>
 
       <form onSubmit={handleSubmit} className="bg-white rounded-xl border shadow-sm p-6 mb-8 space-y-4">

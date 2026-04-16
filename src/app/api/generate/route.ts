@@ -460,7 +460,7 @@ function pickFetchCandidates(urls: string[], max: number): string[] {
   for (const u of pAts.slice(0, 5)) pushUnique(u);           // ATS: 最大5枠
   for (const u of pRecruitPath.slice(0, 3)) pushUnique(u);   // HP内採用系: 最大3枠
   for (const u of pHome.slice(0, 2)) pushUnique(u);          // HPホーム: 最大2枠
-  for (const u of pMedia.slice(0, 2)) pushUnique(u);         // 求人媒体: 最大2枠 (補助扱い)
+  for (const u of pMedia.slice(0, 3)) pushUnique(u);         // 求人媒体: 最大3枠 (募集背景・求める人物像・訴求文など求職者目線の情報源として必須)
   for (const u of pOther.slice(0, 2)) pushUnique(u);         // その他: 最大2枠
   return picked.slice(0, max);
 }
@@ -567,11 +567,17 @@ async function runGroundedSearch(
   label: string
 ): Promise<{ urls: string[]; usage: any; debug: any }> {
   try {
+    // 検索/リサーチは採用ページ発見の精度が最重要 → Pro モデルを使い grounding の判断を賢くする
     const result = await withTimeout(
       ai.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-2.5-pro",
         contents: prompt,
-        config: { tools: [{ googleSearch: {} }], temperature: 0 },
+        config: {
+          tools: [{ googleSearch: {} }],
+          temperature: 0,
+          // Pro は thinking がデフォで効く。採用ページ判断に少し予算を与える
+          thinkingConfig: { thinkingBudget: 512 },
+        } as any,
       }),
       timeoutMs,
       `Gemini(${label})`
@@ -645,14 +651,14 @@ async function findOfficialUrlWithGemini(
     `- "${companyName}" 採用情報 OR 募集要項 OR 職務内容`,
     `- "${companyName}" 公式サイト OR コーポレートサイト`,
     `- "${companyName}" 会社概要 OR ミッション OR ビジョン OR バリュー`,
-    `- "${companyName}" site:indeed.com OR site:doda.jp OR site:mynavi.jp OR site:rikunabi.com  (ATS/公式が無い時のフォールバックのみ)`,
+    `- "${companyName}" site:indeed.com OR site:doda.jp OR site:mynavi.jp OR site:rikunabi.com  (求人媒体: ATS/公式と併せて必ず取る)`,
     "",
     "【出力したいURL（優先度順）】",
     "1. 求人詳細ページ（Talentio/HRMOS/Wantedly/Herpの個別URL）＝最優先",
     "2. ATS企業ルート（open.talentio.com/r/../c/../ や hrmos.co/pages/.. など個別URLがなければ必須）",
     "3. 会社公式サイトの採用/キャリアページ（/careers/ /recruit/ /saiyou/ 等）",
     "4. 会社公式サイト（ホーム・会社概要・MVV）＝HP追加情報用",
-    "5. 求人媒体の該当企業ページ（ATS/公式が一切見つからない時のみ補助）",
+    "5. 求人媒体の該当企業ページ（Indeed/doda/マイナビ/リクナビ/エン/Green等）＝募集背景・求職者訴求文など追加情報用として積極的に含める",
     "",
     "見つけたURLを全てhttps://付きで1行ずつ出力（最大12件）。説明・番号・記号不要。",
   ].join("\n");
@@ -680,13 +686,49 @@ async function findOfficialUrlWithGemini(
     "URLのみ1行ずつhttps://付きで出力（最大8件）。説明不要。",
   ].join("\n");
 
-  const [groundRes, guessRes, researchRes] = await Promise.all([
-    runGroundedSearch(ai, broadPrompt, 15000, "採用URL検索"),
+  // 求人媒体(Indeed/doda/マイナビ/リクナビ/エン/Green/type/ビズリーチ)の掲載ページを積極的に探す追加検索。
+  // これらは ATS/HP に書かれていない「募集背景」「求める人物像」「求職者への訴求文」「応募者の声」が載っていることがあり、
+  // 求職者目線で価値ある情報源なので必ず取りに行く。
+  const mediaPrompt = [
+    `対象企業: 「${companyName}」(この企業名と完全一致する会社のみ)`,
+    "",
+    `この会社が以下の求人媒体に**掲載していれば**、その掲載ページURLを出力してください。${jobClause}`,
+    "",
+    "【探す媒体】",
+    "- Indeed (jp.indeed.com) — 求人詳細/会社ページ",
+    "- doda (doda.jp) — 求人詳細/会社ページ",
+    "- マイナビ転職 (tenshoku.mynavi.jp) — 求人詳細",
+    "- リクナビNEXT (next.rikunabi.com) — 求人詳細",
+    "- エン転職 (employment.en-japan.com) — 求人詳細",
+    "- Green (green-japan.com) — 求人詳細",
+    "- type (type.jp) — 求人詳細",
+    "- ビズリーチ (bizreach.jp) — 求人詳細",
+    "",
+    "【検索ヒント】",
+    `- "${companyName}" site:jp.indeed.com`,
+    `- "${companyName}" site:doda.jp`,
+    `- "${companyName}" site:tenshoku.mynavi.jp`,
+    `- "${companyName}" site:next.rikunabi.com`,
+    `- "${companyName}" site:employment.en-japan.com`,
+    `- "${companyName}" site:green-japan.com`,
+    `- "${companyName}" 採用 site:indeed.com OR site:doda.jp OR site:mynavi.jp`,
+    "",
+    "【絶対遵守】",
+    `- 社名が「${companyName}」と完全一致する掲載のみ返す`,
+    "- 無関係会社の求人URLや、会社名の一部に含まれるだけの求人は絶対に返さない",
+    "- 掲載が見つからない場合は空出力",
+    "",
+    "URLのみ1行ずつhttps://付きで出力（最大6件）。",
+  ].join("\n");
+
+  const [groundRes, guessRes, researchRes, mediaRes] = await Promise.all([
+    runGroundedSearch(ai, broadPrompt, 22000, "採用URL検索"),
     guessUrlsWithoutGrounding(ai, companyName).catch(() => ({
       urls: [] as string[],
       usage: {},
     })),
-    runGroundedSearch(ai, researchPrompt, 12000, "会社情報リサーチ"),
+    runGroundedSearch(ai, researchPrompt, 18000, "会社情報リサーチ"),
+    runGroundedSearch(ai, mediaPrompt, 18000, "求人媒体リサーチ"),
   ]);
 
   // プログラム生成候補: カタカナ→ローマ字で確実なスラッグを作る
@@ -708,13 +750,15 @@ async function findOfficialUrlWithGemini(
   const filteredGrounded = groundRes.urls.filter((u) => !isKnownAtsHost(u) || isPlausibleAtsSlug(u));
   const filteredGuess = guessRes.urls.filter((u) => !isKnownAtsHost(u) || isPlausibleAtsSlug(u));
   const filteredResearch = researchRes.urls.filter((u) => !isKnownAtsHost(u) || isPlausibleAtsSlug(u));
+  // 求人媒体は ATS ではないのでスラッグチェック不要。全て候補化
+  const filteredMedia = (mediaRes as any).urls.filter((u: string) => isSecondaryJobSite(u));
 
   const merged = dedupeUrls(Array.from(
-    new Set([...filteredGrounded, ...filteredGuess, ...deterministicUrls, ...filteredResearch])
+    new Set([...filteredGrounded, ...filteredGuess, ...deterministicUrls, ...filteredResearch, ...filteredMedia])
   ));
   const sorted = sortByPriority(merged);
   console.log(
-    `[search] 採用grounded:${groundRes.urls.length}(有効${filteredGrounded.length}) 推測:${guessRes.urls.length}(有効${filteredGuess.length}) 会社情報research:${researchRes.urls.length}(有効${filteredResearch.length}) 機械生成:${deterministicUrls.length} → 統合${sorted.length}件`
+    `[search] 採用grounded:${groundRes.urls.length}(有効${filteredGrounded.length}) 推測:${guessRes.urls.length}(有効${filteredGuess.length}) 会社情報research:${researchRes.urls.length}(有効${filteredResearch.length}) 求人媒体:${(mediaRes as any).urls.length}(有効${filteredMedia.length}) 機械生成:${deterministicUrls.length} → 統合${sorted.length}件`
   );
   console.log(`[search] ローマ字候補:`, slugCandidates);
 
@@ -722,21 +766,24 @@ async function findOfficialUrlWithGemini(
     promptTokenCount:
       (groundRes.usage?.promptTokenCount || 0) +
       ((guessRes as any).usage?.promptTokenCount || 0) +
-      (researchRes.usage?.promptTokenCount || 0),
+      (researchRes.usage?.promptTokenCount || 0) +
+      ((mediaRes as any).usage?.promptTokenCount || 0),
     candidatesTokenCount:
       (groundRes.usage?.candidatesTokenCount || 0) +
       ((guessRes as any).usage?.candidatesTokenCount || 0) +
-      (researchRes.usage?.candidatesTokenCount || 0),
+      (researchRes.usage?.candidatesTokenCount || 0) +
+      ((mediaRes as any).usage?.candidatesTokenCount || 0),
   };
 
   const debug = {
     grounded: (groundRes as any).debug,
     research: (researchRes as any).debug,
+    media: (mediaRes as any).debug,
     guessUrls: guessRes.urls,
   };
 
-  // 採用3枠 + HP採用系3枠 + HPホーム2枠 + 求人媒体2枠 + その他2枠 を最大限取れるよう上限を拡大
-  return { urls: sorted.slice(0, 16), usage, debug } as any;
+  // ATS最大5 + HP採用系3 + HPホーム2 + 求人媒体3 + その他2 = 最大15枠を取れるよう上限拡大
+  return { urls: sorted.slice(0, 18), usage, debug } as any;
 }
 
 // ---------- 複数ポジション検出 ----------
@@ -825,7 +872,28 @@ const COMMON_RULES = `【絶対ルール】
 
 【ソースの扱い】
 - 採用ページ(PRIMARY)は全て転記。HP/会社概要/求人媒体(Indeed/doda/マイナビ転職/リクナビNEXT/エン転職/Green/type/ビズリーチ等)は追加情報源として、採用ページに無い事実があれば追加する
-- 原文が長い場合は値が長くなっても省略しない（読みやすさのため段落分けや改行は入れてよい）`;
+- 求人媒体には以下のような「ATSに無い求職者目線の情報」が載っていることが多い。**見つけたら必ず取り込む**:
+  * 募集背景・組織拡大の理由・ポジション新設の経緯
+  * 求める人物像（原文ママの訴求文）・求職者への期待
+  * 応募から内定までの選考フロー・面接回数・カジュアル面談の可否
+  * 残業時間の実績値・月平均残業・有給取得率
+  * 社員の声・現場インタビュー・1日の流れ
+  * 会社の成長率・業績数値・表彰歴・メディア露出
+  * 平均年齢・男女比・中途入社比率
+- 原文が長い場合は値が長くなっても省略しない（読みやすさのため段落分けや改行は入れてよい）
+
+【求職者が本当に知りたい情報】
+以下の観点は応募判断に直結するため、原文に手がかりがあれば必ず対応キーに拾うこと:
+- 仕事のやりがい・面白さ（"このポジションの魅力" "得られる経験"）
+- 1日の流れ・働き方イメージ
+- キャリアパス・成長環境・評価制度
+- チーム構成・上司・一緒に働くメンバー
+- 残業の実態・ワークライフバランス
+- リモート可否・フレックス・服装自由度
+- 選考フロー・応募プロセス・カジュアル面談
+- 会社の成長性・事業の将来性・競合優位性
+- 年収レンジ・賞与実績・昇給実績
+- 福利厚生の実態（利用率・独自制度）`;
 
 // パートA: 企業全体情報
 const PROMPT_COMPANY_PART = `あなたは採用ページ原文から求人票を作成する専門家です。与えられた**企業公式の採用ページ全文**から、**企業全体に関する情報**のみをJSONで出力してください。
@@ -843,10 +911,11 @@ ${COMMON_RULES}
 - 各値は短い事実を1〜2行で
 
 # companyInfo（企業情報）
-推奨キー: 事業内容 / ミッション / ビジョン / バリュー / 行動指針 / 事業の特徴・強み / 今後の展望 / カルチャー / 社風 / 設立年月 / 従業員数 / 資本金 / 代表者 / 本社所在地 / 代表メッセージ / 沿革 / グループ会社
+推奨キー: 事業内容 / ミッション / ビジョン / バリュー / 行動指針 / 事業の特徴・強み / 今後の展望 / カルチャー / 社風 / 成長性・業績 / 表彰・受賞歴 / メディア掲載 / 社員構成（平均年齢・男女比・中途入社比率 等） / 設立年月 / 従業員数 / 資本金 / 代表者 / 本社所在地 / 代表メッセージ / 沿革 / グループ会社
 - 「事業内容」は列挙されている事業を全て1つの値にまとめる（改行区切り・先頭「・」の箇条書き、または文章）
 - ミッション/ビジョン/バリューなどナラティブなものは原文の文章をそのまま
 - カルチャー/社風は原文の説明文を網羅した読み物として転記
+- 成長性・業績・表彰歴・メディア露出・社員構成は求人媒体側に載っていることが多い。見つけたら必ず拾う
 
 # holidays（休日・休暇）
 推奨キー: 休日制度 / 年間休日数 / 有給休暇 / 特別休暇 / 長期休暇 / 育児休暇 / 介護休暇
@@ -874,32 +943,41 @@ ${COMMON_RULES}
 各セクションは「トピック名: 値」のマップ。値は原文を網羅した文章または改行区切り箇条書き。番号サフィックス(1,2,3...)は禁止。
 
 # jobContent（仕事内容）
-推奨キー: 主な業務内容 / ポジションの特徴 / このポジションの魅力 / 得られるスキル・経験 / チーム構成 / 配属先 / 1日の流れ / 今後の活躍の場・キャリアパス / 使用ツール・技術スタック
+推奨キー: 主な業務内容 / ポジションの特徴 / このポジションの魅力 / 募集背景 / 得られるスキル・経験 / チーム構成 / 配属先 / 上司・一緒に働くメンバー / 1日の流れ / 今後の活躍の場・キャリアパス / 評価制度 / 使用ツール・技術スタック / 社員の声・インタビュー
 - 「主な業務内容」は原文に列挙された業務を全て1つの値に改行区切り箇条書き（先頭「・」）でまとめる
 - 「得られるスキル・経験」も同様に複数項目を1つの値にまとめる
 - ポジションの特徴・魅力は原文の文章をそのまま転記
+- 募集背景・上司・メンバー・1日の流れ・評価制度・社員の声は求人媒体側にある可能性が高い。見つけたら必ず取り込む
 
 # requirements（応募資格）
-推奨キー: 必須要件 / 歓迎要件 / 求める人材 / 年齢 / 学歴
+推奨キー: 必須要件 / 歓迎要件 / 求める人材（求職者への訴求文） / 年齢 / 学歴
 - 「必須要件」は原文の必須項目を全て1つの値に改行区切り箇条書きでまとめる
 - 「歓迎要件」「求める人材」も同様に1キーに集約
+- 「求める人材」は求人媒体の訴求文（「〜な方を歓迎」「〜な方にピッタリ」等）があれば原文ママで転記
 
 # salary（給与・報酬）
-推奨キー: 想定年収 / 賃金形態 / 基本給 / 月給 / 年俸月額 / 所定内給与 / 固定時間外手当 / 固定深夜手当 / 通勤手当 / 残業手当 / 諸手当 / 給与改定 / 賞与 / 給与モデル例
+推奨キー: 想定年収 / 賃金形態 / 基本給 / 月給 / 年俸月額 / 所定内給与 / 固定時間外手当 / 固定深夜手当 / 通勤手当 / 残業手当 / 諸手当 / 給与改定 / 昇給実績 / 賞与 / 賞与実績 / 給与モデル例
 - 「諸手当」は複数ある場合1つの値に改行区切りでまとめる
 - 固定時間外/深夜手当は金額・時間数・時間帯を1つの値に詳細記述
+- 昇給実績・賞与実績は求人媒体にある場合が多いので積極的に拾う
 
 # workConditions（勤務条件）
-推奨キー: 勤務地 / 勤務地住所 / 最寄り駅 / 勤務時間 / 所定労働時間 / フレックス / コアタイム / 清算期間 / 休憩時間 / リモートワーク / 残業 / 試用期間 / 転勤 / 副業 / 服装
+推奨キー: 勤務地 / 勤務地住所 / 最寄り駅 / 勤務時間 / 所定労働時間 / フレックス / コアタイム / 清算期間 / 休憩時間 / リモートワーク / 残業 / 月平均残業時間 / 有給取得率 / 試用期間 / 転勤 / 副業 / 服装
 - 勤務地が複数拠点ある場合は1つの値に改行区切りでまとめる
 - 休憩時間は原文の細則（例: 12:00-13:00 + 15:00-15:15）を1つの値に詳細転記
+- 月平均残業時間・有給取得率は求人媒体に載りやすい実データ。必ず転記
+
+# selection（選考プロセス）※ 新規セクション
+推奨キー: 応募方法 / 選考フロー / 面接回数 / カジュアル面談 / 必要書類 / 内定までの期間 / 応募後の流れ / 連絡手段
+- 採用ページ/求人媒体の選考情報を網羅
 
 【出力形式（JSONのみ、コードフェンス禁止）】
 {
-  "jobContent": { "主な業務内容":"", "得られるスキル・経験":"", ... },
+  "jobContent": { "主な業務内容":"", "得られるスキル・経験":"", "募集背景":"", ... },
   "requirements": { "必須要件":"", "歓迎要件":"", "求める人材":"", ... },
-  "salary": { "想定年収":"", "年俸月額":"", "固定時間外手当":"", "諸手当":"", ... },
-  "workConditions": { "勤務地":"", "勤務時間":"", "休憩時間":"", ... }
+  "salary": { "想定年収":"", "年俸月額":"", "固定時間外手当":"", "諸手当":"", "昇給実績":"", ... },
+  "workConditions": { "勤務地":"", "勤務時間":"", "休憩時間":"", "月平均残業時間":"", ... },
+  "selection": { "選考フロー":"", "面接回数":"", "カジュアル面談":"", ... }
 }`;
 
 async function generateCompanyPart(
@@ -1026,6 +1104,7 @@ async function generateJobJsonSplit(
     requirements: positionData.requirements || {},
     salary: positionData.salary || {},
     workConditions: positionData.workConditions || {},
+    selection: positionData.selection || {},
     holidays: companyData.holidays || {},
     benefits: companyData.benefits || {},
   };
@@ -1121,7 +1200,7 @@ export async function POST(req: NextRequest) {
     // Step 2: Jina Reader で優先度バランスを取って最大7件を並列取得
     // ATS系(優先1)だけを拾うと homepages が落ちて Stage2 クロールの起点を失うため、
     // 会社HP(優先2)も確実に枠確保。採用ページ＋HP+補助情報を合わせて10件取得。
-    const fetchCandidates = pickFetchCandidates(targetUrls, 10);
+    const fetchCandidates = pickFetchCandidates(targetUrls, 12);
     console.log(`[fetch] Jina Readerで並列取得: ${fetchCandidates.length}件`, fetchCandidates);
     const contents: { url: string; text: string }[] = [];
     const MIN_TEXT_LEN = 150;
@@ -1485,6 +1564,7 @@ export async function POST(req: NextRequest) {
         requirements: jobData.requirements || {},
         salary: jobData.salary || {},
         workConditions: jobData.workConditions || {},
+        selection: jobData.selection || {},
       });
       for (const pos of uniqueDetected.slice(1, 8)) {
         allPositions.push({
@@ -1494,6 +1574,7 @@ export async function POST(req: NextRequest) {
           requirements: {},
           salary: {},
           workConditions: {},
+          selection: {},
         });
       }
     }
@@ -1522,6 +1603,7 @@ export async function POST(req: NextRequest) {
       "requirements",
       "salary",
       "workConditions",
+      "selection",
       "holidays",
       "benefits",
     ];
@@ -1589,7 +1671,7 @@ export async function POST(req: NextRequest) {
           jobTitle: typeof p.jobTitle === "string" ? p.jobTitle : String(p.jobTitle || ""),
           summary: typeof p.summary === "string" ? p.summary : String(p.summary || ""),
         };
-        for (const key of ["jobContent", "requirements", "salary", "workConditions"]) {
+        for (const key of ["jobContent", "requirements", "salary", "workConditions", "selection"]) {
           const section = p[key] || {};
           const expanded: Record<string, string> = {};
           for (const [k, v] of Object.entries(section)) {
