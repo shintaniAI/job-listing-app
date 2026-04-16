@@ -17,8 +17,11 @@ const BLOCKED_SITES = [
 ];
 
 function getGenAI() {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("GEMINI_API_KEY が設定されていません");
+  const apiKey =
+    process.env.GEMINI_202_KYUJIN ||
+    process.env.gemini_202_kyujin ||
+    process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("GEMINI_202_KYUJIN が設定されていません");
   return new GoogleGenAI({ apiKey });
 }
 
