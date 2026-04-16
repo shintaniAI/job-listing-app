@@ -1672,47 +1672,32 @@ export async function POST(req: NextRequest) {
       (c) => isJobDetailUrl(c.url) || isKnownAtsHost(c.url)
     );
     console.log(`[parallel] 検出 + 企業パート + ポジションパート を3並列実行 (recruitment source: ${hasRecruitmentSource})`);
-    const [detectedPositions, primaryResult] = await Promise.all([
-      detectPositionsWithGemini(ai, merged, hasRecruitmentSource).catch((e) => {
-        console.log(`[detect] 失敗: ${e.message}`);
-        return [] as string[];
-      }),
-      generateJobJsonSplit(
-        ai,
-        companyName,
-        primaryPositionCandidate,
-        salary,
-        merged,
-        primaryPositionCandidate || undefined
-      ),
-    ]);
-    const jobData = primaryResult.jobData;
-    const formatUsage = primaryResult.usage;
-    console.log(`[positions] 検出: ${JSON.stringify(detectedPositions)}`);
-
-    const primaryPosition = jobTitle || detectedPositions[0] || "";
-    const subPositionUsages: any[] = [];
-    const allPositions: any[] = [];
-
-    const uniqueDetected = Array.from(
-      new Set([primaryPosition, ...detectedPositions].filter((s) => s && s.trim()))
+    // 1) detection を先行 → 完了次第 sub-positions をバックグラウンドで即発火
+    // 2) primary 生成と sub-positions 生成を並列で走らせて合計時間を圧縮 (旧: 60s→目標 40s)
+    const detectPromise = detectPositionsWithGemini(ai, merged, hasRecruitmentSource).catch((e) => {
+      console.log(`[detect] 失敗: ${e.message}`);
+      return [] as string[];
+    });
+    const primaryPromise = generateJobJsonSplit(
+      ai,
+      companyName,
+      primaryPositionCandidate,
+      salary,
+      merged,
+      primaryPositionCandidate || undefined
     );
 
-    if (!jobTitle && uniqueDetected.length >= 2) {
-      allPositions.push({
-        jobTitle: primaryPosition,
-        summary: jobData.summary || "",
-        jobContent: jobData.jobContent || {},
-        requirements: jobData.requirements || {},
-        salary: jobData.salary || {},
-        workConditions: jobData.workConditions || {},
-        selection: jobData.selection || {},
-      });
-
-      // サブポジションも並列で実際に生成 (以前は空オブジェクトだったため求職者に情報が届いてなかった)
-      // 90秒Vercel予算内に収めるため Flash 優先＋軽量設定で高速生成
-      const subPositions = uniqueDetected.slice(1, 6); // 最大5件に抑制 (時間枠のため)
-      const subSource = merged.slice(0, 40000); // サブは40k字で十分 (焦点絞ってるので)
+    // 検出が終わった瞬間に sub-positions を発火 (primary を待たない)
+    const subsKickoff = detectPromise.then(async (detectedPositions) => {
+      const primaryPos = jobTitle || detectedPositions[0] || "";
+      const uniqueDet = Array.from(
+        new Set([primaryPos, ...detectedPositions].filter((s) => s && s.trim()))
+      );
+      if (jobTitle || uniqueDet.length < 2) {
+        return { subResults: [] as any[], uniqueDetected: uniqueDet };
+      }
+      const subPositions = uniqueDet.slice(1, 6);
+      const subSource = merged.slice(0, 40000);
       console.log(`[sub-positions] ${subPositions.length}件を並列生成: ${JSON.stringify(subPositions)}`);
       const subResults = await Promise.allSettled(
         subPositions.map(async (pos) => {
@@ -1729,7 +1714,6 @@ export async function POST(req: NextRequest) {
               "",
               "上記の**採用ページ原文からのみ**、このポジション固有の情報をJSONで返してください。原文にない情報は書かないでください。",
             ].join("\n");
-            // サブポジションは Flash 優先(高速) → Pro(精度) → Pro Preview(最高)
             const result = await generateWithFallback<any>(
               ai,
               (model) => ({
@@ -1744,7 +1728,7 @@ export async function POST(req: NextRequest) {
               }),
               25000,
               `サブポジション(${pos})`,
-              ["gemini-2.5-flash", "gemini-2.5-pro"] // Flash 優先
+              ["gemini-2.5-flash", "gemini-2.5-pro"]
             );
             const text = result.text || "";
             let data: any;
@@ -1759,6 +1743,36 @@ export async function POST(req: NextRequest) {
           }
         })
       );
+      return { subResults, uniqueDetected: uniqueDet };
+    });
+
+    const [detectedPositions, primaryResult, subsData] = await Promise.all([
+      detectPromise,
+      primaryPromise,
+      subsKickoff,
+    ]);
+    const jobData = primaryResult.jobData;
+    const formatUsage = primaryResult.usage;
+    console.log(`[positions] 検出: ${JSON.stringify(detectedPositions)}`);
+
+    const primaryPosition = jobTitle || detectedPositions[0] || "";
+    const subPositionUsages: any[] = [];
+    const allPositions: any[] = [];
+
+    const uniqueDetected = subsData.uniqueDetected;
+
+    if (!jobTitle && uniqueDetected.length >= 2) {
+      allPositions.push({
+        jobTitle: primaryPosition,
+        summary: jobData.summary || "",
+        jobContent: jobData.jobContent || {},
+        requirements: jobData.requirements || {},
+        salary: jobData.salary || {},
+        workConditions: jobData.workConditions || {},
+        selection: jobData.selection || {},
+      });
+
+      const subResults = subsData.subResults;
       for (const r of subResults) {
         if (r.status === "fulfilled") {
           const { pos, data, usage } = r.value;
