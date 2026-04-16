@@ -74,6 +74,7 @@ export default function Home() {
   const printRef = useRef<HTMLDivElement>(null);
   const [hydrated, setHydrated] = useState(false);
   const [activePositionIndex, setActivePositionIndex] = useState(0);
+  const [positionLoadingIdx, setPositionLoadingIdx] = useState<number | null>(null);
 
   // 状態の復元
   useEffect(() => {
@@ -120,6 +121,43 @@ export default function Home() {
       workConditions: p.workConditions || result.workConditions,
     };
   }, [result, activePositionIndex]);
+
+  // 選択中ポジションの詳細を後追いで生成
+  const fetchPositionDetail = async (idx: number) => {
+    if (!result || !result.positions) return;
+    const p = result.positions[idx];
+    if (!p) return;
+    setPositionLoadingIdx(idx);
+    setError("");
+    try {
+      const res = await fetch("/api/generate-position", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          positionTitle: p.jobTitle,
+          companyName: result.companyName,
+          sources: result.sources || [],
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "ポジション詳細の生成に失敗しました");
+
+      const newPositions = [...(result.positions || [])];
+      newPositions[idx] = {
+        jobTitle: data.jobTitle || p.jobTitle,
+        summary: data.summary || "",
+        jobContent: data.jobContent || {},
+        requirements: data.requirements || {},
+        salary: data.salary || {},
+        workConditions: data.workConditions || {},
+      };
+      setResult({ ...result, positions: newPositions });
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setPositionLoadingIdx(null);
+    }
+  };
 
   const handleClearAll = () => {
     if (!confirm("入力と編集中の求人票をすべてリセットしますか？")) return;
@@ -531,24 +569,55 @@ export default function Home() {
                   📌 募集ポジション ({result.positions.length}件)
                 </h3>
                 <p className="text-xs text-gray-500">
-                  タブ切替で各ポジションの求人票を表示・PDF化できます
+                  タブで切替 / 詳細未生成のタブは「詳細を生成」ボタンで取得
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
-                {result.positions.map((p, i) => (
-                  <button
-                    key={i}
-                    onClick={() => setActivePositionIndex(i)}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium border transition ${
-                      activePositionIndex === i
-                        ? "bg-blue-600 text-white border-blue-600 shadow-sm"
-                        : "bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100"
-                    }`}
-                  >
-                    {i + 1}. {p.jobTitle || "(職種未取得)"}
-                  </button>
-                ))}
+                {result.positions.map((p, i) => {
+                  const hasDetail = Object.keys(p.jobContent || {}).length > 0;
+                  return (
+                    <button
+                      key={i}
+                      onClick={() => setActivePositionIndex(i)}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium border transition ${
+                        activePositionIndex === i
+                          ? "bg-blue-600 text-white border-blue-600 shadow-sm"
+                          : "bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100"
+                      }`}
+                    >
+                      {i + 1}. {p.jobTitle || "(職種未取得)"}
+                      {!hasDetail && (
+                        <span className={`ml-2 text-[10px] ${activePositionIndex === i ? "text-blue-100" : "text-amber-600"}`}>
+                          ● 未生成
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
               </div>
+              {/* 詳細生成ボタン */}
+              {(() => {
+                const active = result.positions[activePositionIndex];
+                if (!active) return null;
+                const hasDetail = Object.keys(active.jobContent || {}).length > 0;
+                if (hasDetail) return null;
+                const loading = positionLoadingIdx === activePositionIndex;
+                return (
+                  <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                    <p className="text-sm text-amber-800 mb-2">
+                      「{active.jobTitle}」の詳細（仕事内容・応募資格・給与・勤務条件）はまだ生成されていません。
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => fetchPositionDetail(activePositionIndex)}
+                      disabled={loading}
+                      className="bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg"
+                    >
+                      {loading ? "🔄 生成中... (20〜40秒)" : "🚀 このポジションの詳細を生成"}
+                    </button>
+                  </div>
+                );
+              })()}
             </div>
           )}
 

@@ -330,59 +330,36 @@ export async function POST(req: NextRequest) {
     let merged = contents.map((c) => `=== ${c.url} ===\n${c.text}`).join("\n\n");
     if (merged.length > MAX_CHARS) merged = merged.slice(0, MAX_CHARS);
 
-    // Step 2.5: 複数ポジション検出
-    console.log(`[positions] 複数ポジションを検出中...`);
-    const detectedPositions = await detectPositionsWithGemini(ai, merged);
-    console.log(`[positions] 検出結果: ${JSON.stringify(detectedPositions)}`);
+    // Step 2.5 & 3: 複数ポジション検出 と プライマリ生成を並列実行（時間短縮）
+    const primaryPositionCandidate = jobTitle || "";
+    console.log(`[parallel] positions検出 と primary生成を並列実行`);
+    const [detectedPositions, primaryResult] = await Promise.all([
+      detectPositionsWithGemini(ai, merged).catch(() => []),
+      generateJobJsonWithGemini(
+        ai,
+        companyName,
+        primaryPositionCandidate,
+        salary,
+        merged,
+        primaryPositionCandidate || undefined
+      ),
+    ]);
+    const jobData = primaryResult.jobData;
+    const formatUsage = primaryResult.usage;
+    console.log(`[positions] 検出: ${JSON.stringify(detectedPositions)}`);
 
-    // プライマリポジションの決定: ユーザー指定 > 検出された最初
+    // 実プライマリ（ユーザー指定優先）
     const primaryPosition = jobTitle || detectedPositions[0] || "";
 
-    // Step 3: プライマリポジションの求人票を生成
-    console.log(`[format] Geminiで整形 (入力${merged.length}文字, focus=${primaryPosition})`);
-    const { jobData, usage: formatUsage } = await generateJobJsonWithGemini(
-      ai,
-      companyName,
-      primaryPosition,
-      salary,
-      merged,
-      primaryPosition || undefined
-    );
-
-    // Step 3.5: 複数ポジションがある場合は各ポジション用に軽量JSONを生成
+    // サブポジションは jobTitle のみを配列化（詳細は後追いで別エンドポイントが担う想定）
     const subPositionUsages: any[] = [];
     const allPositions: any[] = [];
 
-    // ユーザーが特定職種を指定していない かつ 2件以上検出された時のみ複数生成
-    const shouldGenerateMultiple =
-      !jobTitle && detectedPositions.length >= 2 && detectedPositions.length <= 5;
+    const uniqueDetected = Array.from(
+      new Set([primaryPosition, ...detectedPositions].filter((s) => s && s.trim()))
+    );
 
-    if (shouldGenerateMultiple) {
-      console.log(`[positions] ${detectedPositions.length}ポジション分を個別生成します`);
-      // プライマリは既に生成済みなので残りを生成
-      const otherPositions = detectedPositions.filter((p) => p !== primaryPosition);
-
-      // 並列生成 (Gemini Flash は RPM 余裕あり)
-      const subResults = await Promise.all(
-        otherPositions.map(async (pos) => {
-          try {
-            const r = await generateJobJsonWithGemini(
-              ai,
-              companyName,
-              pos,
-              "",
-              merged,
-              pos
-            );
-            return { position: pos, jobData: r.jobData, usage: r.usage };
-          } catch (e: any) {
-            console.log(`  ✗ ${pos}: ${e.message}`);
-            return null;
-          }
-        })
-      );
-
-      // プライマリを先頭にallPositionsに入れる
+    if (!jobTitle && uniqueDetected.length >= 2) {
       allPositions.push({
         jobTitle: primaryPosition,
         summary: jobData.summary || "",
@@ -391,17 +368,14 @@ export async function POST(req: NextRequest) {
         salary: jobData.salary || {},
         workConditions: jobData.workConditions || {},
       });
-
-      for (const r of subResults) {
-        if (!r) continue;
-        subPositionUsages.push(r.usage);
+      for (const pos of uniqueDetected.slice(1, 8)) {
         allPositions.push({
-          jobTitle: r.position,
-          summary: r.jobData.summary || "",
-          jobContent: r.jobData.jobContent || {},
-          requirements: r.jobData.requirements || {},
-          salary: r.jobData.salary || {},
-          workConditions: r.jobData.workConditions || {},
+          jobTitle: pos,
+          summary: "",
+          jobContent: {},
+          requirements: {},
+          salary: {},
+          workConditions: {},
         });
       }
     }
