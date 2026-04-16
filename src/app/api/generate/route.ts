@@ -84,9 +84,10 @@ function isRetryableGeminiError(err: any): boolean {
   );
 }
 
-// モデル階層: 3.1 Pro Preview (最高品質) → 2.5 Pro (安定) → 2.5 Flash (高速フォールバック)
-// 3.1 Pro は現在 preview で 503 も出やすいので、多段で確実に応答を返す設計。
-const MODEL_CHAIN = ["gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash"];
+// モデル階層: 2.5 Pro (安定/速い) → 3.1 Pro Preview (最高品質/不安定) → 2.5 Flash (保険)
+// Vercel 90s 予算: 3.1-pro-preview を先頭にすると preview の遅延/503 でタイムアウト頻発。
+// 実戦では 2.5-pro 先頭が最も安定。3.1 は品質向上余地があれば 2.5 失敗時にチャレンジ。
+const MODEL_CHAIN = ["gemini-2.5-pro", "gemini-3.1-pro-preview", "gemini-2.5-flash"];
 
 async function generateWithFallback<T>(
   ai: GoogleGenAI,
@@ -1139,7 +1140,7 @@ async function generateCompanyPart(
         thinkingConfig: { thinkingBudget: model.includes("pro") ? 256 : 0 },
       } as any,
     }),
-    35000,
+    25000,
     "企業パート生成"
   );
 
@@ -1190,7 +1191,7 @@ async function generatePositionPart(
         thinkingConfig: { thinkingBudget: model.includes("pro") ? 256 : 0 },
       } as any,
     }),
-    40000,
+    30000,
     "ポジションパート生成"
   );
 
@@ -1577,18 +1578,17 @@ export async function POST(req: NextRequest) {
         if (stage3Candidates.length > 0) {
           console.log(`[crawl] Stage3: ハブ配下URL ${stage3Candidates.length}件`);
           console.log(`[crawl] Stage3対象:`, stage3Candidates);
-          // Jina 429 対策: Stage2 完了直後に4並列するとレート制限で全滅する。
-          // 2秒待機＋1件ずつ200ms staggerで発火することでバースト回避。
-          await new Promise((r) => setTimeout(r, 2000));
+          // Jina 429 対策: 4件を 500ms stagger で発火 (バースト判定回避)
+          // 内部リトライ (400-900ms jitter) と併せて数件は通る
           const stage3Results = await Promise.allSettled(
             stage3Candidates.map(
               (url, i) =>
                 new Promise<{ url: string; text: string }>((resolve, reject) => {
                   setTimeout(() => {
-                    fetchJinaReader(url, 9000)
+                    fetchJinaReader(url, 8000)
                       .then((text) => resolve({ url, text }))
                       .catch(reject);
-                  }, i * 200);
+                  }, i * 500);
                 })
             )
           );
