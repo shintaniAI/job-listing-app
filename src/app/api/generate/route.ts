@@ -455,8 +455,10 @@ function isUselessAtsUrl(url: string): boolean {
   try {
     const u = new URL(url);
     const host = u.host.toLowerCase();
-    if (!isKnownAtsHost(url)) return false;
     const p = u.pathname;
+    // ATS外でも共通で 404 / エラーページは除外 (Jinaで取得しても中身が無いor混乱する)
+    if (/\/(404|not-?found|error|privacy-policy|privacy|terms|official-rules|sitemap|entry\/?$)/i.test(p)) return true;
+    if (!isKnownAtsHost(url)) return false;
     // ルート or パス無し
     if (p === "" || p === "/") return true;
     // 会社非依存のサブドメイン (例: atsguide.hrmos.co)
@@ -480,6 +482,7 @@ function shouldHtmlExtractAts(url: string): boolean {
 }
 
 // URLを優先度でソート: 求人詳細 > 公式採用媒体(ATS/HP) > 求人媒体(Indeed等) > その他
+// 同ランク内では「求職者が求める情報」(給与/福利厚生/会社概要/社風) を含むパスを優先
 function sortByPriority(urls: string[]): string[] {
   const rank = (u: string): number => {
     if (isJobDetailUrl(u)) return 0;
@@ -487,7 +490,19 @@ function sortByPriority(urls: string[]): string[] {
     if (isSecondaryJobSite(u)) return 2;
     return 3;
   };
-  return [...urls].sort((a, b) => rank(a) - rank(b));
+  // 求職者の関心度ボーナス: 給与/待遇/福利厚生/文化/会社概要系のパスは優先的に拾う
+  const interestBoost = (u: string): number => {
+    const p = u.toLowerCase();
+    if (/\/(workplace|benefit|welfare|compensation|salary|treatment|reward)/i.test(p)) return 0;
+    if (/\/(culture|working-style|people|member|interview|message)/i.test(p)) return 0;
+    if (/\/(company|about|profile|corporate)/i.test(p)) return 1;
+    return 2;
+  };
+  return [...urls].sort((a, b) => {
+    const r = rank(a) - rank(b);
+    if (r !== 0) return r;
+    return interestBoost(a) - interestBoost(b);
+  });
 }
 
 // www./非www./末尾スラッシュ違い/アンカーフラグメントを正規化（同一ページのURL変種を束ねるため）
