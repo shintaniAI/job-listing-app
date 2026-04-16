@@ -7,6 +7,7 @@ export const maxDuration = 60;
 // 求人媒体（参照禁止リスト）
 const BLOCKED_SITES = [
   "jp.indeed.com",
+  "indeed.com",
   "doda.jp",
   "next.rikunabi.com",
   "tenshoku.mynavi.jp",
@@ -14,6 +15,29 @@ const BLOCKED_SITES = [
   "bizreach.jp",
   "type.jp",
   "townwork.net",
+  "green-japan.com",
+  "mynavi-agent.jp",
+  "recruit-agent.co.jp",
+];
+
+// 優先的に掘りたい公式採用媒体ホスト
+const PREFERRED_HOSTS = [
+  "open.talentio.com",
+  "talentio.com",
+  "hrmos.co",
+  "wantedly.com",
+  "herp.careers",
+  "careers",
+  "recruit",
+];
+
+// 「求人詳細ページっぽい」URLパターン
+const JOB_DETAIL_PATTERNS = [
+  /open\.talentio\.com\/r\/[^/]+\/c\/[^/]+\/pages\/\d+/i,
+  /talentio\.com\/[^/]+\/pages\/\d+/i,
+  /hrmos\.co\/pages\/[^/]+\/jobs\/\d+/i,
+  /wantedly\.com\/projects\/\d+/i,
+  /herp\.careers\/v\d+\/[^/]+\/[^/]+/i,
 ];
 
 function getGenAI() {
@@ -68,7 +92,26 @@ async function fetchJinaReader(url: string, timeoutMs = 20000): Promise<string> 
 }
 
 function isBlockedUrl(url: string): boolean {
-  return BLOCKED_SITES.some((b) => url.includes(b));
+  const lower = url.toLowerCase();
+  return BLOCKED_SITES.some((b) => lower.includes(b));
+}
+
+function isJobDetailUrl(url: string): boolean {
+  return JOB_DETAIL_PATTERNS.some((p) => p.test(url));
+}
+
+function isPreferredHost(url: string): boolean {
+  const lower = url.toLowerCase();
+  return PREFERRED_HOSTS.some((h) => lower.includes(h));
+}
+
+// URLを優先度でソート: 求人詳細 > 公式採用媒体 > その他
+function sortByPriority(urls: string[]): string[] {
+  return [...urls].sort((a, b) => {
+    const ap = isJobDetailUrl(a) ? 0 : isPreferredHost(a) ? 1 : 2;
+    const bp = isJobDetailUrl(b) ? 0 : isPreferredHost(b) ? 1 : 2;
+    return ap - bp;
+  });
 }
 
 // フォールバック: Groundingを使わず知識ベースでURL推測（高速）
@@ -80,16 +123,16 @@ async function guessUrlsWithoutGrounding(
     `あなたの知識から「${companyName}」の公式採用ページURLを推測してください。`,
     "",
     "【候補パターン】",
+    `- https://open.talentio.com/r/1/c/{slug}/pages/{id}`,
+    `- https://hrmos.co/pages/{slug}/jobs/{id}`,
+    `- https://www.wantedly.com/companies/{slug}/projects`,
     `- https://{domain}/careers/`,
     `- https://{domain}/recruit/`,
-    `- https://open.talentio.com/r/1/c/{slug}/`,
-    `- https://hrmos.co/pages/{slug}/jobs`,
-    `- https://www.wantedly.com/companies/{slug}`,
     "",
     "【絶対禁止】以下の求人媒体は無視してください:",
     BLOCKED_SITES.map((s) => `  - ${s}`).join("\n"),
     "",
-    "URLのみ1行ずつ、最大5件出力。説明文不要。知らない場合は空でOK。",
+    "URLのみ1行ずつ、最大6件出力。説明文不要。知らない場合は空でOK。",
   ].join("\n");
 
   const result = await withTimeout(
@@ -107,34 +150,37 @@ async function guessUrlsWithoutGrounding(
     .map((l) => l.trim())
     .filter((l) => /^https?:\/\//.test(l))
     .filter((l) => !isBlockedUrl(l));
-  return { urls: urls.slice(0, 5), usage: (result as any).usageMetadata || {} };
+  return { urls: urls.slice(0, 6), usage: (result as any).usageMetadata || {} };
 }
 
-// ---------- Gemini + Google Search で公式採用URLを探す ----------
+// ---------- Gemini + Google Search で公式採用URLを探す（多角クエリ） ----------
 async function findOfficialUrlWithGemini(
   ai: GoogleGenAI,
   companyName: string,
   jobTitle: string
 ): Promise<{ urls: string[]; usage: any }> {
+  const jobClause = jobTitle ? `特に「${jobTitle}」の職種ページがあれば最優先。` : "";
   const prompt = [
-    `「${companyName}」の情報を豊富に集めるため、公式関連URLを複数種類見つけてください。`,
-    jobTitle ? `職種: ${jobTitle}` : "",
+    `「${companyName}」の求人票を作成するため、公式の採用関連URLをできるだけ多く集めてください。${jobClause}`,
     "",
-    "【欲しいURLの種類（多様に集める）】",
-    `1. 採用/キャリアページ (例: ${companyName} careers, 採用サイト)`,
-    `2. 会社概要/企業情報ページ (例: ${companyName} about, 会社情報)`,
-    `3. 事業内容/サービスページ (例: ${companyName} business, サービス一覧)`,
-    `4. 採用媒体のページ: site:open.talentio.com, site:talentio.com, site:wantedly.com, site:hrmos.co`,
-    `5. Wikipedia 日本語ページ (ja.wikipedia.org/wiki/${companyName})`,
-    `6. プレスリリース/ニュースページ`,
+    "【最優先で見つけたいURL（求人詳細ページ）】",
+    `- open.talentio.com/r/.../c/.../pages/NNNNNN の形式の個別求人ページ`,
+    `- hrmos.co/pages/.../jobs/NNNNNN の形式の個別求人ページ`,
+    `- wantedly.com/projects/NNNNNN の形式の個別募集ページ`,
+    `- herp.careers/v1/.../.../ の形式の個別求人ページ`,
+    `- 会社独自の /careers/jobs/... /recruit/jobs/... 個別求人ページ`,
+    `※ ルートURLだけでなく、個別求人の詳細ページURLを最大6件集めること。`,
     "",
-    "【絶対禁止】以下の求人媒体は無視してください:",
+    "【次点で欲しいURL】",
+    `- 公式の採用/キャリアページ（トップ）`,
+    `- 会社概要・事業内容・ミッション/ビジョン/バリュー（MVV）ページ`,
+    `- プレスリリース・企業ブログ（採用や文化に関するもの）`,
+    "",
+    "【絶対に含めてはいけない（求人媒体）】",
     BLOCKED_SITES.map((s) => `  - ${s}`).join("\n"),
     "",
-    "見つけたURLを **URLだけ1行ずつ**、多様な種類を合わせて**最大8件**出力してください。説明文・番号・マークダウンは不要。",
-  ]
-    .filter(Boolean)
-    .join("\n");
+    "URLだけを1行ずつ**最大12件**出力。説明・番号・マークダウン記法は一切不要。",
+  ].join("\n");
 
   // Grounded検索 (最大18秒、タイムアウト時はフォールバックへ)
   let result: any;
@@ -181,12 +227,12 @@ async function findOfficialUrlWithGemini(
   } catch {}
 
   const merged = Array.from(new Set([...urls, ...grounded]));
+  const sorted = sortByPriority(merged);
   const usage = (result as any).usageMetadata || {};
-  return { urls: merged.slice(0, 8), usage };
+  return { urls: sorted.slice(0, 12), usage };
 }
 
-// ---------- 収集情報を8セクションJSONに整形 ----------
-// 複数ポジション検出: ページテキストから複数の職種が募集されているか判定する
+// ---------- 複数ポジション検出 ----------
 async function detectPositionsWithGemini(
   ai: GoogleGenAI,
   sourceText: string
@@ -204,12 +250,11 @@ async function detectPositionsWithGemini(
     '{"positions": ["職種1", "職種2", ...]}',
     "",
     "【採用ページ全文】",
-    sourceText.slice(0, 15000),
+    sourceText.slice(0, 20000),
   ].join("\n");
 
   const result = await withTimeout(
     ai.models.generateContent({
-      // 検出は軽いタスクなので最速モデル
       model: "gemini-2.5-flash-lite",
       contents: prompt,
       config: {
@@ -232,55 +277,110 @@ async function detectPositionsWithGemini(
   }
 }
 
-// 共通ルール（両パート共通）
+// ====== プロンプト（talentio/HRMOS 実物ベースに再設計） ======
 const COMMON_RULES = `【絶対ルール】
-- 原文に書かれている情報は**一切省略せず全て**JSONに反映する
-- 箇条書き項目は全て転記する（「など」で端折らない）
-- 数値・固有名詞・制度名は原文通りに転記する
-- 情報がない項目は値を "情報なし" にする
-- 雛形にないキーは自由に追加してよい
-- 値は必ず「文字列」で返す（配列・ネストオブジェクト禁止）
-- 複数項目がある場合は個別キー（"主な業務内容1","主な業務内容2"...）に分ける
-- 推測・創作・要約禁止。原文にないことは書かない`;
+- 採用ページに書かれている**原文の情報を全て**JSONに反映する（省略・抜粋禁止）
+- 箇条書き・表・制度一覧は1項目ずつ個別キーに分けて転記する（「など」で端折らない）
+- 数値・固有名詞・制度名・金額は**原文通りに**転記（改変・丸めをしない）
+- 情報がない項目は値を空文字列 "" にする（"情報なし"等の文字列を入れない）
+- 雛形にないキーは自由に追加してよい（原文にある情報は全部拾う）
+- 値は必ず「文字列」（配列・ネストオブジェクト禁止）
+- 複数項目がある場合は個別キー（例: "主な業務内容1","主な業務内容2"...）に分ける
+- **推測・創作・要約は完全禁止**。原文に書かれていないことは絶対に書かない
+- **Indeed/doda/マイナビ転職/リクナビNEXT/エン転職等の求人媒体に書いてある表現や情報は一切使わない**。採用ページ原文のみを根拠とする。`;
 
-// パートA: 企業全体情報 (basicInfo / companyInfo / holidays / benefits / summary)
-const PROMPT_COMPANY_PART = `あなたは求人票作成の専門家です。与えられた採用ページ全文から、**企業全体に関する情報**のみをJSONで出力してください。
+// パートA: 企業全体情報
+const PROMPT_COMPANY_PART = `あなたは採用ページ原文から求人票を作成する専門家です。与えられた**企業公式の採用ページ全文**から、**企業全体に関する情報**のみをJSONで出力してください。
 
 ${COMMON_RULES}
 
-【出力セクション & 最低項目数（talentio水準）】
-- summary: 2〜3文の求人概要
-- basicInfo: 5項目以上 (企業名/募集職種/雇用形態/募集人数/勤務開始日等)
-- companyInfo: **12項目以上** (事業内容1〜N/ミッション/ビジョン/バリュー/特徴/強み/設立/従業員数/資本金/本社/代表メッセージ/カルチャー)
-- holidays: 7項目以上 (年間休日数/週休/有給/特別休暇1〜N/長期休暇/育児休暇)
-- benefits: **15項目以上** (社会保険/退職金/健康/ジム/食事/在宅/通勤/住宅/育児/介護/スキル/書籍/研修/独自制度1〜N)
+【出力セクション & 期待される項目（talentio水準）】
+# summary
+- このポジション／企業の魅力を採用ページの言葉で2〜3文に要約
 
-【出力形式（JSONのみ）】
+# basicInfo（基本情報）最低5項目
+- 企業名 / 募集職種 / 雇用形態 / 募集人数 / 契約期間 / 試用期間の有無 / 勤務開始日 等
+
+# companyInfo（企業情報）最低12項目
+- 事業内容1, 事業内容2, 事業内容3...（原文に列挙されている事業を全て個別キーに）
+- ミッション（Mission）/ ビジョン（Vision）/ バリュー（Value）／行動指針
+- 事業の特徴 / 事業の強み / 今後の展望
+- カルチャー / 社風 / カルチャー特徴
+- 設立年月 / 従業員数 / 資本金 / 代表者 / 本社所在地
+- 代表メッセージ / 沿革 / グループ会社 等、採用ページにある項目は全部拾う
+
+# holidays（休日・休暇）最低7項目
+- 休日制度（例: 完全週休2日制 土日祝）
+- 年間休日数
+- 有給休暇（付与タイミング・日数の原文表記）
+- 特別休暇1, 特別休暇2...（夏季/年末年始/バースデー/慶弔/GW 等を個別に）
+- 長期休暇 / 育児休暇 / 介護休暇 等
+
+# benefits（福利厚生・待遇）最低15項目
+- 社会保険（健康/厚生年金/雇用/労災） ※原文で分かれていれば個別キーに
+- 健康制度（健康診断/インフルエンザ/人間ドック）
+- 食事補助/フリードリンク/軽食/フリーチョコレート 等 原文にある制度を1つずつ
+- 在宅・リモート関連 / 通勤手当 / 住宅手当 / 家族手当
+- 育児・介護支援
+- 学習支援（書籍購入補助/研修/資格取得支援）
+- 独自制度1, 独自制度2...（社員旅行/仮眠制度/慶弔金 等）
+- 退職金 / 表彰制度 / 懇親会制度 等
+
+【出力形式（JSONのみ、コードフェンス禁止）】
 {
   "summary": "...",
-  "basicInfo": { "企業名":"", ... },
-  "companyInfo": { "事業内容1":"", "ミッション":"", ... },
-  "holidays": { "年間休日数":"", ... },
-  "benefits": { "社会保険":"", ... }
+  "basicInfo": { "企業名":"", "募集職種":"", ... },
+  "companyInfo": { "事業内容1":"", "ミッション":"", "ビジョン":"", "バリュー":"", ... },
+  "holidays": { "休日制度":"", "年間休日数":"", "特別休暇1":"", ... },
+  "benefits": { "健康保険":"", "書籍購入補助":"", "社員旅行":"", ... }
 }`;
 
-// パートB: ポジション固有情報 (jobContent / requirements / salary / workConditions)
-const PROMPT_POSITION_PART = `あなたは求人票作成の専門家です。与えられた採用ページ全文から、**ポジションの業務/応募条件**に関する情報のみをJSONで出力してください。
+// パートB: ポジション固有情報
+const PROMPT_POSITION_PART = `あなたは採用ページ原文から求人票を作成する専門家です。与えられた**企業公式の採用ページ全文**から、**ポジションの業務/条件**に関する情報のみをJSONで出力してください。
 
 ${COMMON_RULES}
 
-【出力セクション & 最低項目数（talentio水準）】
-- jobContent: **業務内容10〜20項目** ("主な業務内容1"〜"主な業務内容N") + 業務の流れ/チーム構成/配属/キャリアパス/将来性/技術スタック/使用ツール
-- requirements: 必須5項目 + 歓迎5項目 + 求める人物像 + 年齢 + 学歴（最低10項目）
-- salary: **10項目以上** (基本給/想定年収/年俸月額/固定時間外手当/固定深夜手当/昇給/賞与/諸手当1〜N/給与モデル例)
-- workConditions: **10項目以上** (勤務地/住所/アクセス/勤務時間/コアタイム/リモート/頻度/残業/試用期間/転勤/服装)
+【出力セクション & 期待される項目（talentio水準）】
+# jobContent（仕事内容）最低10項目
+- 主な業務内容1, 主な業務内容2...（原文の業務列挙を全て個別キーに）
+- ポジションの特徴 / このポジションの魅力
+- 得られるスキル・経験1, 得られるスキル・経験2...
+- チーム構成 / 配属先 / 1日の流れ
+- 今後の活躍の場・キャリアパス
+- 使用ツール・技術スタック（書いてあれば）
 
-【出力形式（JSONのみ）】
+# requirements（応募資格）最低10項目
+- 必須要件1, 必須要件2... （原文の「必須」項目を全部個別キーに）
+- 歓迎要件1, 歓迎要件2... （原文の「歓迎」項目を全部個別キーに）
+- 求める人材1, 求める人材2...（原文の「求める人材」「こんな方を求めています」項目を全部）
+- 年齢 / 学歴（書いてあれば）
+
+# salary（給与・報酬）最低10項目
+- 想定年収（提示年俸） / 賃金形態 / 基本給 / 月給
+- 年俸月額 / 所定内給与
+- 固定時間外手当（月額・時間数）
+- 固定深夜手当（月額・時間数・時間帯）
+- 通勤手当 / 残業手当 / 諸手当1, 諸手当2...
+- 給与改定(昇給頻度) / 賞与(種類・時期・業績連動有無)
+- 給与モデル例（書いてあれば）
+
+# workConditions（勤務条件）最低10項目
+- 勤務地（オフィス/自宅/サテライト等、原文の表記を尊重）
+- 勤務地住所 / 最寄り駅
+- 勤務時間 / 所定労働時間 / フレックス有無 / コアタイム
+- 清算期間
+- 休憩時間（原文の細則通り）
+- リモートワーク可否 / リモート頻度
+- 残業 / 所定時間外労働の有無
+- 試用期間 / 試用期間中の条件
+- 転勤 / 副業 / 服装
+
+【出力形式（JSONのみ、コードフェンス禁止）】
 {
   "jobContent": { "主な業務内容1":"", ... },
-  "requirements": { "必須要件1":"", ... },
-  "salary": { "基本給":"", ... },
-  "workConditions": { "勤務地":"", ... }
+  "requirements": { "必須要件1":"", "歓迎要件1":"", "求める人材1":"", ... },
+  "salary": { "想定年収":"", "年俸月額":"", "固定時間外手当":"", ... },
+  "workConditions": { "勤務地":"", "勤務時間":"", "休憩時間":"", ... }
 }`;
 
 async function generateCompanyPart(
@@ -293,10 +393,10 @@ async function generateCompanyPart(
     "",
     `会社名(ユーザー入力): ${companyName || "（未指定）"}`,
     "",
-    "【採用ページ全文テキスト】",
+    "【採用ページ全文テキスト（複数ソース統合）】",
     sourceText,
     "",
-    "上記から企業全体の情報だけをJSONで返してください。",
+    "上記の**採用ページ原文からのみ**、企業全体の情報をJSONで返してください。原文にない情報は書かないでください。",
   ].join("\n");
 
   const result = await withTimeout(
@@ -305,13 +405,12 @@ async function generateCompanyPart(
       contents: prompt,
       config: {
         responseMimeType: "application/json",
-        temperature: 0.2,
-        maxOutputTokens: 8000,
-        // thinkingを無効化して高速化
+        temperature: 0.1,
+        maxOutputTokens: 12000,
         thinkingConfig: { thinkingBudget: 0 },
       } as any,
     }),
-    28000,
+    32000,
     "Gemini(企業パート生成)"
   );
 
@@ -341,12 +440,12 @@ async function generatePositionPart(
     `会社名(ユーザー入力): ${companyName || "（未指定）"}`,
     `職種(ユーザー入力): ${jobTitle || "（未指定）"}`,
     `給与(ユーザー入力): ${salary || "（未指定）"}`,
-    focusHint ? `\n【重要】「${focusHint}」というポジション専用の情報に絞ってください。` : "",
+    focusHint ? `\n【重要】「${focusHint}」というポジション専用の情報に絞ってください。他職種の内容は混ぜないでください。` : "",
     "",
-    "【採用ページ全文テキスト】",
+    "【採用ページ全文テキスト（複数ソース統合）】",
     sourceText,
     "",
-    "上記からポジション固有の情報だけをJSONで返してください。",
+    "上記の**採用ページ原文からのみ**、ポジション固有の情報をJSONで返してください。原文にない情報は書かないでください。",
   ].join("\n");
 
   const result = await withTimeout(
@@ -355,12 +454,12 @@ async function generatePositionPart(
       contents: prompt,
       config: {
         responseMimeType: "application/json",
-        temperature: 0.2,
-        maxOutputTokens: 8000,
+        temperature: 0.1,
+        maxOutputTokens: 12000,
         thinkingConfig: { thinkingBudget: 0 },
       } as any,
     }),
-    28000,
+    32000,
     "Gemini(ポジションパート生成)"
   );
 
@@ -376,7 +475,6 @@ async function generatePositionPart(
   return { data, usage: (result as any).usageMetadata || {} };
 }
 
-// ２つのパートを並列実行して merge する（片方失敗しても片方は生きる）
 async function generateJobJsonSplit(
   ai: GoogleGenAI,
   companyName: string,
@@ -459,7 +557,19 @@ export async function POST(req: NextRequest) {
           { status: 400 }
         );
       }
+      // ユーザー指定URLを優先しつつ、同じ会社の他ページも補助的に探す
       targetUrls = [companyUrl];
+      if (companyName) {
+        try {
+          const more = await findOfficialUrlWithGemini(ai, companyName, jobTitle);
+          searchUsage = more.usage;
+          for (const u of more.urls) {
+            if (!targetUrls.includes(u)) targetUrls.push(u);
+          }
+        } catch (e: any) {
+          console.log(`[search] 補助URL探索失敗: ${e.message}`);
+        }
+      }
     } else if (companyName) {
       console.log(`[search] Gemini+Search で公式URL探索: ${companyName}`);
       const r = await findOfficialUrlWithGemini(ai, companyName, jobTitle);
@@ -470,7 +580,7 @@ export async function POST(req: NextRequest) {
           "公式採用ページのURLが見つかりませんでした。採用ページURLを直接入力してください。"
         );
       }
-      console.log(`[search] 候補URL: ${targetUrls.length}件`, targetUrls);
+      console.log(`[search] 候補URL: ${targetUrls.length}件`);
     } else {
       return NextResponse.json(
         { error: "会社名または採用ページURLを入力してください" },
@@ -478,13 +588,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Step 2: Jina Reader で全文Markdown取得（並列 + 直列フォールバック）
-    const fetchCandidates = targetUrls.slice(0, 5);
+    // 優先度順にソート
+    targetUrls = sortByPriority(targetUrls);
+    console.log(`[search] ソート後URL:`, targetUrls);
+
+    // Step 2: Jina Reader で最大6件を並列取得
+    const fetchCandidates = targetUrls.slice(0, 6);
     console.log(`[fetch] Jina Readerで並列取得: ${fetchCandidates.length}件`);
     const contents: { url: string; text: string }[] = [];
     const MIN_TEXT_LEN = 150;
 
-    // Phase 1: 並列取得 (15秒タイムアウトで各URL)
     const fetchResults = await Promise.allSettled(
       fetchCandidates.map((url) => fetchJinaReader(url, 15000).then((text) => ({ url, text })))
     );
@@ -497,16 +610,16 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Phase 2: 並列で1件も取れなければ、直列で余裕を持って最低1件取得にトライ
+    // 並列が全滅なら直列フォールバック
     if (contents.length === 0) {
-      console.log(`[fetch] 並列全失敗、直列フォールバックで再挑戦`);
+      console.log(`[fetch] 並列全失敗、直列フォールバック`);
       for (const url of fetchCandidates) {
         try {
           const text = await fetchJinaReader(url, 18000);
           if (text && text.length > MIN_TEXT_LEN) {
             contents.push({ url, text });
             console.log(`  ✓ (serial) ${url} (${text.length}文字)`);
-            break; // 1件取れたら次へ
+            break;
           }
         } catch (e: any) {
           console.log(`  ✗ (serial) ${url}: ${e.message}`);
@@ -520,14 +633,20 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Gemini入力は50000文字まで（複数ソース結合、+ヘッダ付けで情報の出所が分かる）
-    const MAX_CHARS = 50000;
-    let merged = contents.map((c) => `=== ${c.url} ===\n${c.text}`).join("\n\n");
+    // Gemini入力: 最大80000文字、求人詳細ページを先頭に
+    const MAX_CHARS = 80000;
+    const sortedContents = [...contents].sort((a, b) => {
+      const ap = isJobDetailUrl(a.url) ? 0 : isPreferredHost(a.url) ? 1 : 2;
+      const bp = isJobDetailUrl(b.url) ? 0 : isPreferredHost(b.url) ? 1 : 2;
+      return ap - bp;
+    });
+    let merged = sortedContents
+      .map((c) => `=== SOURCE URL: ${c.url} ===\n${c.text}`)
+      .join("\n\n---\n\n");
     if (merged.length > MAX_CHARS) merged = merged.slice(0, MAX_CHARS);
     console.log(`[fetch] 最終ソース数: ${contents.length}件 / ${merged.length}文字`);
 
-    // Step 2.5 & 3: 検出 と 2分割並列生成 を全て並列実行
-    // [detection, companyPart, positionPart] 3並列 → max(3コール)
+    // Step 3: 検出 + 2分割並列生成
     const primaryPositionCandidate = jobTitle || "";
     console.log(`[parallel] 検出 + 企業パート + ポジションパート を3並列実行`);
     const [detectedPositions, primaryResult] = await Promise.all([
@@ -548,10 +667,7 @@ export async function POST(req: NextRequest) {
     const formatUsage = primaryResult.usage;
     console.log(`[positions] 検出: ${JSON.stringify(detectedPositions)}`);
 
-    // 実プライマリ（ユーザー指定優先）
     const primaryPosition = jobTitle || detectedPositions[0] || "";
-
-    // サブポジションは jobTitle のみを配列化（詳細は後追いで別エンドポイントが担う想定）
     const subPositionUsages: any[] = [];
     const allPositions: any[] = [];
 
@@ -580,7 +696,6 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // "情報なし" 系の値は空文字に戻す（フロント表示対策）
     const EMPTY_SET = new Set(["情報なし", "なし", "未記載", "—", "-", "N/A", "n/a", "該当なし", "未定"]);
     const normalizeEmpty = (v: any): string => {
       if (v === null || v === undefined) return "";
@@ -588,7 +703,6 @@ export async function POST(req: NextRequest) {
       return EMPTY_SET.has(s) ? "" : s;
     };
 
-    // ユーザー入力で上書き
     if (companyName) jobData.companyName = companyName;
     if (jobTitle) jobData.jobTitle = jobTitle;
     jobData.companyName = normalizeEmpty(jobData.companyName);
@@ -596,7 +710,7 @@ export async function POST(req: NextRequest) {
     if (jobData.summary) jobData.summary = normalizeEmpty(jobData.summary);
     if (salary) {
       jobData.salary = jobData.salary || {};
-      jobData.salary["基本給"] = salary;
+      jobData.salary["想定年収"] = salary;
     }
 
     const requiredSections = [
@@ -615,7 +729,6 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ネストしたオブジェクト/配列を flat な文字列に変換（フロントの textarea 表示前提）
     const flattenValue = (v: any, depth = 0): string => {
       if (v === null || v === undefined) return "";
       if (typeof v === "string") return v;
@@ -639,16 +752,10 @@ export async function POST(req: NextRequest) {
       return String(v);
     };
 
-    // 子キーを1段階にフラット化して追加キーとして展開する
-    // 例: salary.給与内訳 = { 提示年俸総額内訳: "X", 月給換算額の定義: "Y" }
-    //   → salary["給与内訳_提示年俸総額内訳"] = "X"
-    //   → salary["給与内訳_月給換算額の定義"] = "Y"
-    // かつ salary.給与内訳 自体も flat string として残す
     for (const sectionKey of requiredSections) {
       const section = jobData[sectionKey];
       const expanded: Record<string, string> = {};
       for (const [k, v] of Object.entries(section)) {
-        // ネストオブジェクトは子キーも展開（情報密度を増やす）
         if (
           v &&
           typeof v === "object" &&
@@ -659,22 +766,21 @@ export async function POST(req: NextRequest) {
             expanded[`${k}｜${ck}`] = flattenValue(cv);
           }
         } else {
-          expanded[k] = flattenValue(v);
+          const s = flattenValue(v);
+          expanded[k] = EMPTY_SET.has(s.trim()) ? "" : s;
         }
       }
       jobData[sectionKey] = expanded;
     }
 
-    // トップレベルの文字列化
     if (typeof jobData.summary !== "string") jobData.summary = flattenValue(jobData.summary);
     if (typeof jobData.companyName !== "string")
       jobData.companyName = flattenValue(jobData.companyName);
     if (typeof jobData.jobTitle !== "string")
       jobData.jobTitle = flattenValue(jobData.jobTitle);
 
-    jobData.sources = contents.map((c) => c.url);
+    jobData.sources = contents.map((c) => c.url).filter((u) => !isBlockedUrl(u));
 
-    // 正規化: ポジション配列内のフィールドも flatten
     if (allPositions.length > 0) {
       jobData.positions = allPositions.map((p) => {
         const normalized: any = {
@@ -690,7 +796,8 @@ export async function POST(req: NextRequest) {
                 expanded[`${k}｜${ck}`] = flattenValue(cv);
               }
             } else {
-              expanded[k] = flattenValue(v);
+              const s = flattenValue(v);
+              expanded[k] = EMPTY_SET.has(s.trim()) ? "" : s;
             }
           }
           normalized[key] = expanded;
@@ -699,9 +806,6 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // コスト算出 (Gemini 2.5 Flash 料金 / 2025年時点)
-    // input: $0.30 / 1M tokens, output: $2.50 / 1M tokens
-    // Google Search Grounding: $35 / 1000 request (無料枠500/日)
     const totalInputTokens =
       (searchUsage?.promptTokenCount || 0) +
       (formatUsage?.promptTokenCount || 0) +
@@ -712,7 +816,7 @@ export async function POST(req: NextRequest) {
       subPositionUsages.reduce((s, u) => s + (u?.candidatesTokenCount || 0), 0);
     const inputCostUSD = (totalInputTokens / 1_000_000) * 0.3;
     const outputCostUSD = (totalOutputTokens / 1_000_000) * 2.5;
-    const searchCostUSD = searchUsage ? 35 / 1000 : 0; // URL探索した場合のみ
+    const searchCostUSD = searchUsage ? 35 / 1000 : 0;
     const totalUSD = inputCostUSD + outputCostUSD + searchCostUSD;
     const usdToJpy = 155;
 
@@ -723,10 +827,7 @@ export async function POST(req: NextRequest) {
       source_count: contents.length,
       detected_positions: detectedPositions,
       positions_generated: allPositions.length,
-      tokens: {
-        input: totalInputTokens,
-        output: totalOutputTokens,
-      },
+      tokens: { input: totalInputTokens, output: totalOutputTokens },
       cost: {
         input_usd: +inputCostUSD.toFixed(6),
         output_usd: +outputCostUSD.toFixed(6),

@@ -389,7 +389,7 @@ export default function Home() {
         padding:12px 14px; min-height:40px; line-height:1.55;
         box-sizing:border-box;
       }
-      th > .cell { background:#f3f4f6; color:#4b5563; font-weight:700; min-height:40px; }
+      th > .cell { background:#dbeafe; color:#1e3a8a; font-weight:700; min-height:40px; }
       td > .cell { white-space:pre-wrap; word-break:break-word; }
     </style></head><body>
       <div class="header">
@@ -494,12 +494,12 @@ export default function Home() {
 
   return (
     <main className="max-w-4xl mx-auto px-4 py-12">
-      <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成アプリ v2.0</h1>
-      <p className="text-center text-gray-500 mb-2">
-        企業の公式採用ページから詳細情報を収集 → 8セクション構成の求人票を生成
+      <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成アプリ v2.1</h1>
+      <p className="text-center text-gray-600 mb-2">
+        企業の公式採用ページ（Talentio / HRMOS / Wantedly / 自社採用HP）を横断取得し、原文ベースで8セクションの求人票を生成します。
       </p>
-      <p className="text-center text-sm text-blue-600 mb-8">
-        🎯 Talentio、Wantedly、HRMOS等の公式採用ページを最優先で検索・分析
+      <p className="text-center text-sm text-red-600 mb-8">
+        ⚠ Indeed / doda / マイナビ転職 / リクナビNEXT / エン転職 等の求人媒体は参照しません
       </p>
 
       <form onSubmit={handleSubmit} className="bg-white rounded-xl border shadow-sm p-6 mb-8 space-y-4">
@@ -574,8 +574,8 @@ export default function Home() {
           <div className="inline-block animate-spin rounded-full h-8 w-8 border-4 border-blue-600 border-t-transparent mb-4"></div>
           <div className="space-y-2">
             <p className="text-gray-700 font-medium">企業の公式採用ページを検索・分析しています...</p>
-            <p className="text-sm text-gray-500">Talentio、Wantedly、HRMOS、企業サイトを優先的に調査中</p>
-            <p className="text-xs text-gray-400">通常15-30秒で完了します</p>
+            <p className="text-sm text-gray-500">Talentio / HRMOS / Wantedly / 自社採用HP を最大6件並列で取得</p>
+            <p className="text-xs text-gray-400">通常15-40秒で完了します</p>
           </div>
         </div>
       )}
@@ -812,9 +812,9 @@ const PrintLayout = React.forwardRef<HTMLDivElement, { data: JobData }>(function
                         display: "flex",
                         alignItems: "center",
                         justifyContent: "flex-start",
-                        background: "#f9fafb",
-                        color: "#374151",
-                        fontWeight: 600,
+                        background: "#dbeafe",
+                        color: "#1e3a8a",
+                        fontWeight: 700,
                         padding: "12px 14px",
                         minHeight: "40px",
                         lineHeight: 1.55,
@@ -906,11 +906,11 @@ function EditableSection({
   const itemCount = entries.length;
   
   return (
-    <div className="border rounded-lg p-4 bg-gray-50">
-      <div className="flex items-center justify-between border-b-2 border-blue-600 pb-2 mb-4">
+    <div className="border-2 border-gray-200 rounded-lg p-4 bg-white">
+      <div className="flex items-center justify-between border-b-4 border-blue-600 pb-2 mb-4">
         <div>
-          <h3 className="font-bold text-gray-800 text-lg">{title}</h3>
-          <p className="text-xs text-gray-500 mt-1">項目数: {itemCount}個</p>
+          <h3 className="font-bold text-blue-900 text-lg">{title}</h3>
+          <p className="text-xs text-gray-600 mt-1">項目数: {itemCount}個</p>
         </div>
         <button
           type="button"
@@ -970,7 +970,7 @@ function KeyValueRow({
   };
 
   return (
-    <div className="bg-white rounded-lg border p-3 shadow-sm">
+    <div className="bg-white rounded-lg border border-gray-300 p-3 shadow-sm">
       <div className="flex flex-col lg:flex-row gap-3 items-start">
         <div className="lg:w-1/3">
           <input
@@ -984,7 +984,7 @@ function KeyValueRow({
                 (e.target as HTMLInputElement).blur();
               }
             }}
-            className="w-full border border-gray-200 bg-blue-50 rounded px-3 py-2 text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white"
+            className="w-full border-2 border-blue-300 bg-blue-100 rounded px-3 py-2 text-sm font-bold text-blue-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white"
             placeholder="項目名"
           />
         </div>
@@ -993,7 +993,7 @@ function KeyValueRow({
             value={value}
             onChange={(e) => onChangeValue(e.target.value)}
             rows={Math.max(2, Math.min(6, (value || "").split("\n").length + 1))}
-            className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full border border-gray-400 rounded px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
             placeholder="詳細情報を入力..."
           />
         </div>

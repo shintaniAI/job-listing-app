@@ -6,6 +6,7 @@ export const maxDuration = 60;
 
 const BLOCKED_SITES = [
   "jp.indeed.com",
+  "indeed.com",
   "doda.jp",
   "next.rikunabi.com",
   "tenshoku.mynavi.jp",
@@ -13,6 +14,9 @@ const BLOCKED_SITES = [
   "bizreach.jp",
   "type.jp",
   "townwork.net",
+  "green-japan.com",
+  "mynavi-agent.jp",
+  "recruit-agent.co.jp",
 ];
 
 function getGenAI() {
@@ -38,7 +42,8 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 }
 
 function isBlockedUrl(url: string): boolean {
-  return BLOCKED_SITES.some((b) => url.includes(b));
+  const lower = url.toLowerCase();
+  return BLOCKED_SITES.some((b) => lower.includes(b));
 }
 
 async function fetchJinaReader(url: string, timeoutMs = 20000): Promise<string> {
@@ -62,32 +67,37 @@ async function fetchJinaReader(url: string, timeoutMs = 20000): Promise<string> 
   }
 }
 
-// 特定ポジションに絞った部分セクション生成
-const POSITION_INSTRUCTION = `あなたは求人票作成の専門家です。与えられた採用ページ全文と「対象ポジション名」から、そのポジション**固有**の4セクションだけをJSONで返してください。
-
-【出力する4セクション】
-- jobContent (仕事内容 / 業務内容を個別キーに分けて列挙)
-- requirements (応募資格: 必須/歓迎/求める人物像)
-- salary (給与: 年収/月給/固定時間外手当/賞与/諸手当 等を個別キーに)
-- workConditions (勤務条件: 勤務地/勤務時間/リモート可否/残業/試用期間 等)
+const POSITION_INSTRUCTION = `あなたは採用ページ原文から求人票を作成する専門家です。与えられた**企業公式の採用ページ全文**と「対象ポジション名」から、そのポジション**固有**の4セクションをJSONで返してください。
 
 【絶対ルール】
-- 値は必ず「文字列」。配列・ネストオブジェクト禁止
-- 複数項目は個別キーに分ける（例: "主な業務内容1", "主な業務内容2", ...）
+- 採用ページに書かれている**原文の情報を全て**JSONに反映する（省略・抜粋禁止）
+- 箇条書き・制度一覧は1項目ずつ個別キーに分けて転記（「など」で端折らない）
+- 数値・固有名詞・制度名・金額は**原文通りに**転記
+- 情報がない項目は値を空文字列 "" にする
+- 値は必ず「文字列」（配列・ネストオブジェクト禁止）
+- 複数項目は個別キー（例: "主な業務内容1","主な業務内容2"...）
 - 該当ポジション固有の情報のみ抽出（他職種の内容は混ぜない）
-- 情報がなければ値を "情報なし" にする
-- 原文の数値・固有名詞・制度名をそのまま転記
+- **推測・創作・要約は完全禁止**。原文にないことは書かない
+- **Indeed/doda/マイナビ転職/リクナビNEXT/エン転職等の求人媒体表現は一切使わない**
 
-【追加出力】
-- summary: このポジションの概要を2〜3文で
+【出力する4セクション & 期待項目】
+# summary: このポジションの概要を原文ベースで2〜3文
+# jobContent（仕事内容）最低10項目
+  - 主な業務内容1,2,3...（原文列挙を全て）/ ポジションの特徴 / 得られるスキル1,2... / チーム構成 / キャリアパス / 使用ツール
+# requirements（応募資格）最低10項目
+  - 必須要件1,2...（原文の必須項目全部）/ 歓迎要件1,2... / 求める人材1,2... / 年齢 / 学歴
+# salary（給与）最低10項目
+  - 想定年収 / 賃金形態 / 基本給 / 年俸月額 / 所定内給与 / 固定時間外手当 / 固定深夜手当 / 諸手当1,2... / 昇給 / 賞与 / 給与モデル例
+# workConditions（勤務条件）最低10項目
+  - 勤務地 / 住所 / 最寄り駅 / 勤務時間 / フレックス / コアタイム / 清算期間 / 休憩時間 / リモート可否 / リモート頻度 / 残業 / 試用期間 / 転勤 / 副業 / 服装
 
-【出力形式（JSONのみ）】
+【出力形式（JSONのみ、コードフェンス禁止）】
 {
   "summary": "...",
   "jobContent": { "主な業務内容1": "...", ... },
-  "requirements": { ... },
-  "salary": { ... },
-  "workConditions": { ... }
+  "requirements": { "必須要件1":"", "歓迎要件1":"", "求める人材1":"", ... },
+  "salary": { "想定年収":"", "固定時間外手当":"", ... },
+  "workConditions": { "勤務地":"", "勤務時間":"", "休憩時間":"", ... }
 }`;
 
 const flattenValue = (v: any, depth = 0): string => {
@@ -111,6 +121,8 @@ const flattenValue = (v: any, depth = 0): string => {
   return String(v);
 };
 
+const EMPTY_SET = new Set(["情報なし", "なし", "未記載", "—", "-", "N/A", "n/a", "該当なし", "未定"]);
+
 export async function POST(req: NextRequest) {
   let body: any;
   try {
@@ -122,7 +134,9 @@ export async function POST(req: NextRequest) {
   const positionTitle = String(body.positionTitle || "").trim().slice(0, 200);
   const companyName = String(body.companyName || "").trim().slice(0, 200);
   const sources: string[] = Array.isArray(body.sources)
-    ? body.sources.filter((s: any) => typeof s === "string" && /^https?:\/\//.test(s) && !isBlockedUrl(s)).slice(0, 3)
+    ? body.sources
+        .filter((s: any) => typeof s === "string" && /^https?:\/\//.test(s) && !isBlockedUrl(s))
+        .slice(0, 4)
     : [];
 
   if (!positionTitle) {
@@ -136,20 +150,21 @@ export async function POST(req: NextRequest) {
   try {
     const ai = getGenAI();
 
-    // 元ソースを再取得（Jinaはキャッシュされるので高速）
+    // 元ソースを並列で再取得
     const texts: string[] = [];
-    for (const url of sources) {
-      try {
-        const t = await fetchJinaReader(url);
-        if (t && t.length > 200) texts.push(`=== ${url} ===\n${t}`);
-      } catch {}
-      if (texts.length >= 2) break;
+    const results = await Promise.allSettled(
+      sources.map((u) => fetchJinaReader(u, 15000).then((t) => ({ u, t })))
+    );
+    for (const r of results) {
+      if (r.status === "fulfilled" && r.value.t && r.value.t.length > 200) {
+        texts.push(`=== SOURCE URL: ${r.value.u} ===\n${r.value.t}`);
+      }
     }
     if (texts.length === 0) {
       throw new Error("採用ページの再取得に失敗しました");
     }
 
-    const merged = texts.join("\n\n").slice(0, 60000);
+    const merged = texts.join("\n\n---\n\n").slice(0, 80000);
 
     const prompt = [
       POSITION_INSTRUCTION,
@@ -157,10 +172,10 @@ export async function POST(req: NextRequest) {
       `会社名: ${companyName || "（未指定）"}`,
       `対象ポジション: ${positionTitle}`,
       "",
-      "【採用ページ全文】",
+      "【採用ページ全文（複数ソース統合）】",
       merged,
       "",
-      "上記からこのポジション固有の情報のみを JSON で返してください。",
+      "上記の**採用ページ原文からのみ**、このポジション固有の情報をJSONで返してください。",
     ].join("\n");
 
     const result = await withTimeout(
@@ -169,12 +184,12 @@ export async function POST(req: NextRequest) {
         contents: prompt,
         config: {
           responseMimeType: "application/json",
-          temperature: 0.2,
-          maxOutputTokens: 8000,
+          temperature: 0.1,
+          maxOutputTokens: 12000,
           thinkingConfig: { thinkingBudget: 0 },
         } as any,
       }),
-      35000,
+      38000,
       "Gemini(ポジション詳細生成)"
     );
 
@@ -187,11 +202,12 @@ export async function POST(req: NextRequest) {
       parsed = JSON.parse(m[0]);
     }
 
-    // 正規化
     const out: any = {
       jobTitle: positionTitle,
       summary: typeof parsed.summary === "string" ? parsed.summary : flattenValue(parsed.summary),
     };
+    if (EMPTY_SET.has(String(out.summary).trim())) out.summary = "";
+
     for (const key of ["jobContent", "requirements", "salary", "workConditions"]) {
       const section = parsed[key] || {};
       const expanded: Record<string, string> = {};
@@ -201,7 +217,8 @@ export async function POST(req: NextRequest) {
             expanded[`${k}｜${ck}`] = flattenValue(cv);
           }
         } else {
-          expanded[k] = flattenValue(v);
+          const s = flattenValue(v);
+          expanded[k] = EMPTY_SET.has(s.trim()) ? "" : s;
         }
       }
       out[key] = expanded;
@@ -213,7 +230,7 @@ export async function POST(req: NextRequest) {
     out._meta = {
       elapsed_ms: Date.now() - startedAt,
       tokens: { input: inTok, output: outTok },
-      cost_jpy_approx: +((inTok / 1_000_000) * 0.3 + (outTok / 1_000_000) * 2.5).toFixed(6) * 155,
+      cost_jpy_approx: +(((inTok / 1_000_000) * 0.3 + (outTok / 1_000_000) * 2.5) * 155).toFixed(3),
     };
 
     return NextResponse.json(out);
