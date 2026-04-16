@@ -1678,19 +1678,54 @@ export async function POST(req: NextRequest) {
       });
 
       // サブポジションも並列で実際に生成 (以前は空オブジェクトだったため求職者に情報が届いてなかった)
-      // 各ポジションで merged 全文を渡し focusHint で絞らせる。60k字に切り詰めてトークン抑制。
-      const subPositions = uniqueDetected.slice(1, 8);
-      const subSource = merged.slice(0, 60000);
+      // 90秒Vercel予算内に収めるため Flash 優先＋軽量設定で高速生成
+      const subPositions = uniqueDetected.slice(1, 6); // 最大5件に抑制 (時間枠のため)
+      const subSource = merged.slice(0, 40000); // サブは40k字で十分 (焦点絞ってるので)
       console.log(`[sub-positions] ${subPositions.length}件を並列生成: ${JSON.stringify(subPositions)}`);
       const subResults = await Promise.allSettled(
-        subPositions.map((pos) =>
-          generatePositionPart(ai, companyName, pos, salary, subSource, pos)
-            .then((r) => ({ pos, data: r.data, usage: r.usage }))
-            .catch((e) => {
-              console.log(`[sub-positions] ${pos} 失敗: ${e.message}`);
-              return { pos, data: {} as any, usage: {} as any };
-            })
-        )
+        subPositions.map(async (pos) => {
+          try {
+            const prompt = [
+              PROMPT_POSITION_PART,
+              "",
+              `会社名(ユーザー入力): ${companyName || "（未指定）"}`,
+              `職種(ユーザー入力): ${pos}`,
+              `\n【重要】「${pos}」というポジション専用の情報のみに絞ってください。他職種の内容は混ぜないでください。`,
+              "",
+              "【採用ページ全文テキスト（複数ソース統合）】",
+              subSource,
+              "",
+              "上記の**採用ページ原文からのみ**、このポジション固有の情報をJSONで返してください。原文にない情報は書かないでください。",
+            ].join("\n");
+            // サブポジションは Flash 優先(高速) → Pro(精度) → Pro Preview(最高)
+            const result = await generateWithFallback<any>(
+              ai,
+              (model) => ({
+                model,
+                contents: prompt,
+                config: {
+                  responseMimeType: "application/json",
+                  temperature: 0.1,
+                  maxOutputTokens: 8000,
+                  thinkingConfig: { thinkingBudget: model.includes("pro") ? 128 : 0 },
+                } as any,
+              }),
+              25000,
+              `サブポジション(${pos})`,
+              ["gemini-2.5-flash", "gemini-2.5-pro"] // Flash 優先
+            );
+            const text = result.text || "";
+            let data: any;
+            try { data = JSON.parse(text); } catch {
+              const m = text.match(/\{[\s\S]*\}/);
+              data = m ? JSON.parse(m[0]) : {};
+            }
+            return { pos, data, usage: (result as any).usageMetadata || {} };
+          } catch (e: any) {
+            console.log(`[sub-positions] ${pos} 失敗: ${e.message}`);
+            return { pos, data: {} as any, usage: {} as any };
+          }
+        })
       );
       for (const r of subResults) {
         if (r.status === "fulfilled") {
@@ -1706,6 +1741,19 @@ export async function POST(req: NextRequest) {
             selection: data.selection || {},
           });
         }
+      }
+
+      // 6番目以降は空プレースホルダで残す (ユーザが個別クリックして /api/generate-position で詳細生成できる)
+      for (const pos of uniqueDetected.slice(6, 8)) {
+        allPositions.push({
+          jobTitle: pos,
+          summary: "",
+          jobContent: {},
+          requirements: {},
+          salary: {},
+          workConditions: {},
+          selection: {},
+        });
       }
     }
 
