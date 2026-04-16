@@ -139,8 +139,22 @@ export default function Home() {
           sources: result.sources || [],
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "ポジション詳細の生成に失敗しました");
+
+      // JSONを安全にパース（Vercelのエラーページ対策）
+      const raw = await res.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        if (res.status === 504) {
+          throw new Error("ポジション詳細の生成がタイムアウトしました (60秒超過)。\n再試行するか、別のポジションで試してください。");
+        }
+        if (res.status >= 500) {
+          throw new Error(`サーバーエラー (${res.status})\n少し時間を置いて再試行してください。`);
+        }
+        throw new Error(`予期しないレスポンス (${res.status}): ${raw.slice(0, 200)}`);
+      }
+      if (!res.ok) throw new Error(data?.error || `ポジション詳細の生成に失敗しました (${res.status})`);
 
       const newPositions = [...(result.positions || [])];
       newPositions[idx] = {
@@ -196,8 +210,21 @@ export default function Home() {
         }),
       });
 
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "エラーが発生しました");
+      // JSONを安全にパース（Vercelのエラーページ対策）
+      const raw = await res.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        if (res.status === 504) {
+          throw new Error("処理がタイムアウトしました (60秒超過)。\n採用ページURLを直接入力すると安定します。\n例: https://open.talentio.com/...");
+        }
+        if (res.status >= 500) {
+          throw new Error(`サーバーエラー (${res.status})\n少し時間を置いて再試行してください。`);
+        }
+        throw new Error(`予期しないレスポンス (${res.status}): ${raw.slice(0, 200)}`);
+      }
+      if (!res.ok) throw new Error(data?.error || `エラーが発生しました (${res.status})`);
 
       // 新しい8セクション構造に対応
       setResult({

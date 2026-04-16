@@ -26,21 +26,31 @@ function getGenAI() {
 }
 
 // ---------- Jina Reader: URLからMarkdown全文取得 ----------
-async function fetchJinaReader(url: string): Promise<string> {
+async function fetchJinaReader(url: string, timeoutMs = 20000): Promise<string> {
   const target = `https://r.jina.ai/${url}`;
-  const res = await fetch(target, {
-    method: "GET",
-    headers: {
-      Accept: "text/plain",
-      "X-Return-Format": "markdown",
-    },
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    throw new Error(`Jina Reader取得失敗: ${res.status} ${res.statusText}`);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(target, {
+      method: "GET",
+      headers: {
+        Accept: "text/plain",
+        "X-Return-Format": "markdown",
+      },
+      cache: "no-store",
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      throw new Error(`Jina Reader取得失敗: ${res.status} ${res.statusText}`);
+    }
+    const text = await res.text();
+    return text;
+  } catch (e: any) {
+    if (e?.name === "AbortError") throw new Error(`Jina Readerタイムアウト(${timeoutMs}ms): ${url}`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
-  const text = await res.text();
-  return text;
 }
 
 function isBlockedUrl(url: string): boolean {

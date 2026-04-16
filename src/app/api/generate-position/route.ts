@@ -28,15 +28,25 @@ function isBlockedUrl(url: string): boolean {
   return BLOCKED_SITES.some((b) => url.includes(b));
 }
 
-async function fetchJinaReader(url: string): Promise<string> {
+async function fetchJinaReader(url: string, timeoutMs = 20000): Promise<string> {
   const target = `https://r.jina.ai/${url}`;
-  const res = await fetch(target, {
-    method: "GET",
-    headers: { Accept: "text/plain", "X-Return-Format": "markdown" },
-    cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`Jina取得失敗: ${res.status}`);
-  return await res.text();
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(target, {
+      method: "GET",
+      headers: { Accept: "text/plain", "X-Return-Format": "markdown" },
+      cache: "no-store",
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`Jina取得失敗: ${res.status}`);
+    return await res.text();
+  } catch (e: any) {
+    if (e?.name === "AbortError") throw new Error(`Jina Readerタイムアウト(${timeoutMs}ms)`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // 特定ポジションに絞った部分セクション生成
