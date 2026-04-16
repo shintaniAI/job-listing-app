@@ -117,20 +117,21 @@ async function findOfficialUrlWithGemini(
   jobTitle: string
 ): Promise<{ urls: string[]; usage: any }> {
   const prompt = [
-    `「${companyName}」の公式採用ページURLを見つけてください。`,
+    `「${companyName}」の情報を豊富に集めるため、公式関連URLを複数種類見つけてください。`,
     jobTitle ? `職種: ${jobTitle}` : "",
     "",
-    "【検索優先順位】",
-    `1. site:open.talentio.com "${companyName}"`,
-    `2. site:talentio.com "${companyName}"`,
-    `3. site:wantedly.com "${companyName}"`,
-    `4. site:hrmos.co "${companyName}"`,
-    `5. "${companyName}" 採用サイト`,
+    "【欲しいURLの種類（多様に集める）】",
+    `1. 採用/キャリアページ (例: ${companyName} careers, 採用サイト)`,
+    `2. 会社概要/企業情報ページ (例: ${companyName} about, 会社情報)`,
+    `3. 事業内容/サービスページ (例: ${companyName} business, サービス一覧)`,
+    `4. 採用媒体のページ: site:open.talentio.com, site:talentio.com, site:wantedly.com, site:hrmos.co`,
+    `5. Wikipedia 日本語ページ (ja.wikipedia.org/wiki/${companyName})`,
+    `6. プレスリリース/ニュースページ`,
     "",
     "【絶対禁止】以下の求人媒体は無視してください:",
     BLOCKED_SITES.map((s) => `  - ${s}`).join("\n"),
     "",
-    "見つけたURLを **URLだけ1行ずつ**、複数候補 (最大5件) を出力してください。説明文・番号・マークダウンは不要。",
+    "見つけたURLを **URLだけ1行ずつ**、多様な種類を合わせて**最大8件**出力してください。説明文・番号・マークダウンは不要。",
   ]
     .filter(Boolean)
     .join("\n");
@@ -181,7 +182,7 @@ async function findOfficialUrlWithGemini(
 
   const merged = Array.from(new Set([...urls, ...grounded]));
   const usage = (result as any).usageMetadata || {};
-  return { urls: merged.slice(0, 5), usage };
+  return { urls: merged.slice(0, 8), usage };
 }
 
 // ---------- 収集情報を8セクションJSONに整形 ----------
@@ -477,19 +478,39 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Step 2: Jina Reader で全文Markdown取得（並列で全URL同時取得、情報量最大化）
-    const fetchCandidates = targetUrls.slice(0, 4);
+    // Step 2: Jina Reader で全文Markdown取得（並列 + 直列フォールバック）
+    const fetchCandidates = targetUrls.slice(0, 5);
     console.log(`[fetch] Jina Readerで並列取得: ${fetchCandidates.length}件`);
-    const fetchResults = await Promise.allSettled(
-      fetchCandidates.map((url) => fetchJinaReader(url, 11000).then((text) => ({ url, text })))
-    );
     const contents: { url: string; text: string }[] = [];
+    const MIN_TEXT_LEN = 150;
+
+    // Phase 1: 並列取得 (15秒タイムアウトで各URL)
+    const fetchResults = await Promise.allSettled(
+      fetchCandidates.map((url) => fetchJinaReader(url, 15000).then((text) => ({ url, text })))
+    );
     for (const r of fetchResults) {
-      if (r.status === "fulfilled" && r.value.text && r.value.text.length > 200) {
+      if (r.status === "fulfilled" && r.value.text && r.value.text.length > MIN_TEXT_LEN) {
         contents.push(r.value);
         console.log(`  ✓ ${r.value.url} (${r.value.text.length}文字)`);
       } else if (r.status === "rejected") {
         console.log(`  ✗ ${r.reason?.message || r.reason}`);
+      }
+    }
+
+    // Phase 2: 並列で1件も取れなければ、直列で余裕を持って最低1件取得にトライ
+    if (contents.length === 0) {
+      console.log(`[fetch] 並列全失敗、直列フォールバックで再挑戦`);
+      for (const url of fetchCandidates) {
+        try {
+          const text = await fetchJinaReader(url, 18000);
+          if (text && text.length > MIN_TEXT_LEN) {
+            contents.push({ url, text });
+            console.log(`  ✓ (serial) ${url} (${text.length}文字)`);
+            break; // 1件取れたら次へ
+          }
+        } catch (e: any) {
+          console.log(`  ✗ (serial) ${url}: ${e.message}`);
+        }
       }
     }
 
@@ -499,10 +520,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Gemini入力は55000文字まで（並列取得なので複数ソースの情報を盛り込める）
-    const MAX_CHARS = 55000;
+    // Gemini入力は50000文字まで（複数ソース結合、+ヘッダ付けで情報の出所が分かる）
+    const MAX_CHARS = 50000;
     let merged = contents.map((c) => `=== ${c.url} ===\n${c.text}`).join("\n\n");
     if (merged.length > MAX_CHARS) merged = merged.slice(0, MAX_CHARS);
+    console.log(`[fetch] 最終ソース数: ${contents.length}件 / ${merged.length}文字`);
 
     // Step 2.5 & 3: 検出 と 2分割並列生成 を全て並列実行
     // [detection, companyPart, positionPart] 3並列 → max(3コール)
