@@ -1015,7 +1015,13 @@ export async function POST(req: NextRequest) {
     // grounded search がいきなり /c/orizo/ や /homes/XXX を返したケースで、
     // そのページ自身のSPA描画を HTML 版 Jina で取り直してリンクを発掘する。
     // Stage 2 は本文中のリンク抽出しかできないためSPA の場合ここで補う必要がある。
+    //
+    // 「正しい会社か」の検証も兼ねる:
+    //  - SPA例外でフィルタを通過した短文ATS URL に対して HTML 抽出が 0 件を返す場合、
+    //    そのATSは当該企業のページではない可能性が高い (例: hallucinated slug "gikou")
+    //  - よって検証失敗(抽出0件)かつSPA例外で通した内容は contents から取り除く
     const stage1AtsHtmlPages: string[] = [];
+    const stage1AtsVerifiedUrls = new Set<string>();
     {
       const stage1Ats = contents.filter((c) => shouldHtmlExtractAts(c.url));
       if (stage1Ats.length > 0) {
@@ -1028,8 +1034,37 @@ export async function POST(req: NextRequest) {
           if (r.status === "fulfilled") {
             console.log(`  HTML抽出 ${stage1Ats[i].url} → ${r.value.length}件`);
             for (const u of r.value) stage1AtsHtmlPages.push(u);
+            if (r.value.length > 0) stage1AtsVerifiedUrls.add(stage1Ats[i].url);
           }
         }
+      }
+    }
+
+    // ---------- SPA例外で通したが検証失敗したATSを除外 ----------
+    // 本文が短くて会社名マッチを回避した ATS URL のうち、HTML抽出で求人リンクが0件だったもの、
+    // または markdown にも会社名が含まれないものを除外する。誤ったスラッグの ATS URL が
+    // sources に混入するのを防ぐ。
+    if (!companyUrl && nameTokens.length > 0) {
+      const before = contents.length;
+      const kept = contents.filter((c) => {
+        // ATS でない or 本文が十分長い → 既に会社名検証済み
+        const wasSpaExempt =
+          isKnownAtsHost(c.url) &&
+          isAtsUrlCompanySpecific(c.url) &&
+          c.text.length < SPA_PLACEHOLDER_LEN;
+        if (!wasSpaExempt) return true;
+        // 本文に会社名が含まれる → OK
+        if (textMentionsCompany(c.text, nameTokens)) return true;
+        // HTML抽出で求人URLが取れた → OK (企業特定の傍証)
+        if (stage1AtsVerifiedUrls.has(c.url)) return true;
+        // それ以外はスラッグ不一致の疑い
+        console.log(`  × ATS検証失敗(抽出0件かつ本文に会社名なし): ${c.url}`);
+        return false;
+      });
+      if (kept.length !== before) {
+        contents.length = 0;
+        contents.push(...kept);
+        console.log(`[filter] ATS検証後: ${before}→${contents.length}件`);
       }
     }
 
