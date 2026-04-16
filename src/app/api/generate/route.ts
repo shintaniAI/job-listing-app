@@ -71,6 +71,45 @@ function isBlockedUrl(url: string): boolean {
   return BLOCKED_SITES.some((b) => url.includes(b));
 }
 
+// フォールバック: Groundingを使わず知識ベースでURL推測（高速）
+async function guessUrlsWithoutGrounding(
+  ai: GoogleGenAI,
+  companyName: string
+): Promise<{ urls: string[]; usage: any }> {
+  const prompt = [
+    `あなたの知識から「${companyName}」の公式採用ページURLを推測してください。`,
+    "",
+    "【候補パターン】",
+    `- https://{domain}/careers/`,
+    `- https://{domain}/recruit/`,
+    `- https://open.talentio.com/r/1/c/{slug}/`,
+    `- https://hrmos.co/pages/{slug}/jobs`,
+    `- https://www.wantedly.com/companies/{slug}`,
+    "",
+    "【絶対禁止】以下の求人媒体は無視してください:",
+    BLOCKED_SITES.map((s) => `  - ${s}`).join("\n"),
+    "",
+    "URLのみ1行ずつ、最大5件出力。説明文不要。知らない場合は空でOK。",
+  ].join("\n");
+
+  const result = await withTimeout(
+    ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: prompt,
+      config: { temperature: 0, maxOutputTokens: 500 },
+    }),
+    7000,
+    "Gemini(URLフォールバック推測)"
+  );
+  const text = result.text || "";
+  const urls = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => /^https?:\/\//.test(l))
+    .filter((l) => !isBlockedUrl(l));
+  return { urls: urls.slice(0, 5), usage: (result as any).usageMetadata || {} };
+}
+
 // ---------- Gemini + Google Search で公式採用URLを探す ----------
 async function findOfficialUrlWithGemini(
   ai: GoogleGenAI,
@@ -96,25 +135,36 @@ async function findOfficialUrlWithGemini(
     .filter(Boolean)
     .join("\n");
 
-  const result = await withTimeout(
-    ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: {
-        tools: [{ googleSearch: {} }],
-        temperature: 0,
-      },
-    }),
-    15000,
-    "Gemini(URL検索)"
-  );
+  // Grounded検索 (最大18秒、タイムアウト時はフォールバックへ)
+  let result: any;
+  try {
+    result = await withTimeout(
+      ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: prompt,
+        config: {
+          tools: [{ googleSearch: {} }],
+          temperature: 0,
+        },
+      }),
+      18000,
+      "Gemini(URL検索)"
+    );
+  } catch (e: any) {
+    console.log(`[search] grounding失敗 (${e.message}), フォールバックへ`);
+    const fb = await guessUrlsWithoutGrounding(ai, companyName).catch(() => ({
+      urls: [] as string[],
+      usage: {},
+    }));
+    return fb;
+  }
 
   const text = result.text || "";
   const urls = text
     .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => /^https?:\/\//.test(l))
-    .filter((l) => !isBlockedUrl(l));
+    .map((l: string) => l.trim())
+    .filter((l: string) => /^https?:\/\//.test(l))
+    .filter((l: string) => !isBlockedUrl(l));
 
   // grounding metadata からも取る
   const grounded: string[] = [];
@@ -270,10 +320,10 @@ async function generateJobJsonWithGemini(
       config: {
         responseMimeType: "application/json",
         temperature: 0.2,
-        maxOutputTokens: 14000,
+        maxOutputTokens: 12000,
       },
     }),
-    38000,
+    30000,
     "Gemini(求人票生成)"
   );
 
@@ -348,7 +398,7 @@ export async function POST(req: NextRequest) {
     const fetchCandidates = targetUrls.slice(0, 4);
     console.log(`[fetch] Jina Readerで並列取得: ${fetchCandidates.length}件`);
     const fetchResults = await Promise.allSettled(
-      fetchCandidates.map((url) => fetchJinaReader(url, 13000).then((text) => ({ url, text })))
+      fetchCandidates.map((url) => fetchJinaReader(url, 11000).then((text) => ({ url, text })))
     );
     const contents: { url: string; text: string }[] = [];
     for (const r of fetchResults) {
