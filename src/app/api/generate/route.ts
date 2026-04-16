@@ -107,6 +107,46 @@ async function findOfficialUrlWithGemini(
 }
 
 // ---------- 収集情報を8セクションJSONに整形 ----------
+// 複数ポジション検出: ページテキストから複数の職種が募集されているか判定する
+async function detectPositionsWithGemini(
+  ai: GoogleGenAI,
+  sourceText: string
+): Promise<string[]> {
+  const prompt = [
+    "以下の採用ページテキストから、募集されている職種名を全て抽出してください。",
+    "",
+    "【ルール】",
+    "- 同一ポジションの別名表記は統合（例: 「営業」と「ソリューション営業」が同一なら1つ）",
+    "- 職種名は原文にあるものをそのまま使う",
+    "- 該当が1つしか無い場合は1つだけ返す",
+    "- 最大10件",
+    "",
+    "【出力形式（JSONのみ）】",
+    '{"positions": ["職種1", "職種2", ...]}',
+    "",
+    "【採用ページ全文】",
+    sourceText.slice(0, 30000),
+  ].join("\n");
+
+  const result = await ai.models.generateContent({
+    model: "gemini-2.5-flash",
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      temperature: 0,
+      maxOutputTokens: 1000,
+    },
+  });
+
+  try {
+    const parsed = JSON.parse(result.text || "{}");
+    const arr = Array.isArray(parsed.positions) ? parsed.positions : [];
+    return arr.filter((s: any) => typeof s === "string" && s.trim().length > 0).slice(0, 10);
+  } catch {
+    return [];
+  }
+}
+
 const GENERATION_INSTRUCTION = `あなたは求人票作成の専門家です。与えられた「採用ページ全文テキスト」から、採用ホームページと同等の情報密度で求人票JSONを生成してください。
 
 【最重要】
@@ -163,7 +203,8 @@ async function generateJobJsonWithGemini(
   companyName: string,
   jobTitle: string,
   salary: string,
-  sourceText: string
+  sourceText: string,
+  focusHint?: string
 ): Promise<{ jobData: any; usage: any }> {
   const userPrompt = [
     GENERATION_INSTRUCTION,
@@ -174,6 +215,9 @@ async function generateJobJsonWithGemini(
     `会社名(ユーザー入力): ${companyName || "（未指定）"}`,
     `職種(ユーザー入力): ${jobTitle || "（未指定）"}`,
     `給与(ユーザー入力): ${salary || "（未指定）"}`,
+    focusHint
+      ? `\n【重要】本JSONは「${focusHint}」というポジション専用の求人票として生成してください。\n- jobContent, requirements, salary, workConditions はこのポジション固有の内容にする\n- companyInfo, holidays, benefits など会社全体の情報は共通で構わない`
+      : "",
     "",
     "【採用ページ全文テキスト】",
     sourceText,
@@ -286,15 +330,81 @@ export async function POST(req: NextRequest) {
     let merged = contents.map((c) => `=== ${c.url} ===\n${c.text}`).join("\n\n");
     if (merged.length > MAX_CHARS) merged = merged.slice(0, MAX_CHARS);
 
-    // Step 3: Gemini で 8セクションJSON生成
-    console.log(`[format] Geminiで整形 (入力${merged.length}文字)`);
+    // Step 2.5: 複数ポジション検出
+    console.log(`[positions] 複数ポジションを検出中...`);
+    const detectedPositions = await detectPositionsWithGemini(ai, merged);
+    console.log(`[positions] 検出結果: ${JSON.stringify(detectedPositions)}`);
+
+    // プライマリポジションの決定: ユーザー指定 > 検出された最初
+    const primaryPosition = jobTitle || detectedPositions[0] || "";
+
+    // Step 3: プライマリポジションの求人票を生成
+    console.log(`[format] Geminiで整形 (入力${merged.length}文字, focus=${primaryPosition})`);
     const { jobData, usage: formatUsage } = await generateJobJsonWithGemini(
       ai,
       companyName,
-      jobTitle,
+      primaryPosition,
       salary,
-      merged
+      merged,
+      primaryPosition || undefined
     );
+
+    // Step 3.5: 複数ポジションがある場合は各ポジション用に軽量JSONを生成
+    const subPositionUsages: any[] = [];
+    const allPositions: any[] = [];
+
+    // ユーザーが特定職種を指定していない かつ 2件以上検出された時のみ複数生成
+    const shouldGenerateMultiple =
+      !jobTitle && detectedPositions.length >= 2 && detectedPositions.length <= 5;
+
+    if (shouldGenerateMultiple) {
+      console.log(`[positions] ${detectedPositions.length}ポジション分を個別生成します`);
+      // プライマリは既に生成済みなので残りを生成
+      const otherPositions = detectedPositions.filter((p) => p !== primaryPosition);
+
+      // 並列生成 (Gemini Flash は RPM 余裕あり)
+      const subResults = await Promise.all(
+        otherPositions.map(async (pos) => {
+          try {
+            const r = await generateJobJsonWithGemini(
+              ai,
+              companyName,
+              pos,
+              "",
+              merged,
+              pos
+            );
+            return { position: pos, jobData: r.jobData, usage: r.usage };
+          } catch (e: any) {
+            console.log(`  ✗ ${pos}: ${e.message}`);
+            return null;
+          }
+        })
+      );
+
+      // プライマリを先頭にallPositionsに入れる
+      allPositions.push({
+        jobTitle: primaryPosition,
+        summary: jobData.summary || "",
+        jobContent: jobData.jobContent || {},
+        requirements: jobData.requirements || {},
+        salary: jobData.salary || {},
+        workConditions: jobData.workConditions || {},
+      });
+
+      for (const r of subResults) {
+        if (!r) continue;
+        subPositionUsages.push(r.usage);
+        allPositions.push({
+          jobTitle: r.position,
+          summary: r.jobData.summary || "",
+          jobContent: r.jobData.jobContent || {},
+          requirements: r.jobData.requirements || {},
+          salary: r.jobData.salary || {},
+          workConditions: r.jobData.workConditions || {},
+        });
+      }
+    }
 
     // "情報なし" 系の値は空文字に戻す（フロント表示対策）
     const EMPTY_SET = new Set(["情報なし", "なし", "未記載", "—", "-", "N/A", "n/a", "該当なし", "未定"]);
@@ -390,14 +500,42 @@ export async function POST(req: NextRequest) {
 
     jobData.sources = contents.map((c) => c.url);
 
+    // 正規化: ポジション配列内のフィールドも flatten
+    if (allPositions.length > 0) {
+      jobData.positions = allPositions.map((p) => {
+        const normalized: any = {
+          jobTitle: typeof p.jobTitle === "string" ? p.jobTitle : String(p.jobTitle || ""),
+          summary: typeof p.summary === "string" ? p.summary : String(p.summary || ""),
+        };
+        for (const key of ["jobContent", "requirements", "salary", "workConditions"]) {
+          const section = p[key] || {};
+          const expanded: Record<string, string> = {};
+          for (const [k, v] of Object.entries(section)) {
+            if (v && typeof v === "object" && !Array.isArray(v) && Object.keys(v as any).length > 0) {
+              for (const [ck, cv] of Object.entries(v as any)) {
+                expanded[`${k}｜${ck}`] = flattenValue(cv);
+              }
+            } else {
+              expanded[k] = flattenValue(v);
+            }
+          }
+          normalized[key] = expanded;
+        }
+        return normalized;
+      });
+    }
+
     // コスト算出 (Gemini 2.5 Flash 料金 / 2025年時点)
     // input: $0.30 / 1M tokens, output: $2.50 / 1M tokens
     // Google Search Grounding: $35 / 1000 request (無料枠500/日)
     const totalInputTokens =
-      (searchUsage?.promptTokenCount || 0) + (formatUsage?.promptTokenCount || 0);
+      (searchUsage?.promptTokenCount || 0) +
+      (formatUsage?.promptTokenCount || 0) +
+      subPositionUsages.reduce((s, u) => s + (u?.promptTokenCount || 0), 0);
     const totalOutputTokens =
       (searchUsage?.candidatesTokenCount || 0) +
-      (formatUsage?.candidatesTokenCount || 0);
+      (formatUsage?.candidatesTokenCount || 0) +
+      subPositionUsages.reduce((s, u) => s + (u?.candidatesTokenCount || 0), 0);
     const inputCostUSD = (totalInputTokens / 1_000_000) * 0.3;
     const outputCostUSD = (totalOutputTokens / 1_000_000) * 2.5;
     const searchCostUSD = searchUsage ? 35 / 1000 : 0; // URL探索した場合のみ
@@ -409,6 +547,8 @@ export async function POST(req: NextRequest) {
       elapsed_ms: Date.now() - startedAt,
       source_chars: merged.length,
       source_count: contents.length,
+      detected_positions: detectedPositions,
+      positions_generated: allPositions.length,
       tokens: {
         input: totalInputTokens,
         output: totalOutputTokens,

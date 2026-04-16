@@ -4,6 +4,15 @@ import React, { useState, useRef, useEffect } from "react";
 
 const STORAGE_KEY = "job-listing-app:state:v2";
 
+type JobPosition = {
+  jobTitle: string;
+  summary: string;
+  jobContent: Record<string, string>;
+  requirements: Record<string, string>;
+  salary: Record<string, string>;
+  workConditions: Record<string, string>;
+};
+
 type JobData = {
   companyName: string;
   jobTitle: string;
@@ -16,6 +25,7 @@ type JobData = {
   workConditions: Record<string, string>;
   holidays: Record<string, string>;
   benefits: Record<string, string>;
+  positions?: JobPosition[];
   sources?: string[];
 };
 
@@ -63,6 +73,7 @@ export default function Home() {
   const [pdfGenerating, setPdfGenerating] = useState(false);
   const printRef = useRef<HTMLDivElement>(null);
   const [hydrated, setHydrated] = useState(false);
+  const [activePositionIndex, setActivePositionIndex] = useState(0);
 
   // 状態の復元
   useEffect(() => {
@@ -90,6 +101,25 @@ export default function Home() {
       );
     } catch {}
   }, [hydrated, companyName, companyUrl, jobTitle, salary, result]);
+
+  // ポジション切替用: 表示するデータを合成
+  const displayResult: JobData | null = React.useMemo(() => {
+    if (!result) return null;
+    const positions = result.positions;
+    if (!positions || positions.length <= 1) return result;
+    const idx = Math.min(activePositionIndex, positions.length - 1);
+    const p = positions[idx];
+    if (!p) return result;
+    return {
+      ...result,
+      jobTitle: p.jobTitle || result.jobTitle,
+      summary: p.summary || result.summary,
+      jobContent: p.jobContent || result.jobContent,
+      requirements: p.requirements || result.requirements,
+      salary: p.salary || result.salary,
+      workConditions: p.workConditions || result.workConditions,
+    };
+  }, [result, activePositionIndex]);
 
   const handleClearAll = () => {
     if (!confirm("入力と編集中の求人票をすべてリセットしますか？")) return;
@@ -144,8 +174,10 @@ export default function Home() {
         workConditions: data.workConditions || {},
         holidays: data.holidays || {},
         benefits: data.benefits || {},
+        positions: Array.isArray(data.positions) ? data.positions : undefined,
         sources: data.sources || [],
       });
+      setActivePositionIndex(0);
 
     } catch (err: any) {
       setError(err.message);
@@ -155,7 +187,7 @@ export default function Home() {
   };
 
   const handleDownloadPdf = async () => {
-    if (!result) return;
+    if (!displayResult) return;
     const node = printRef.current;
     if (!node) return;
     setPdfGenerating(true);
@@ -213,7 +245,7 @@ export default function Home() {
         }
       }
 
-      const fileName = `求人票_${result.companyName || "job"}_${new Date().toISOString().slice(0, 10)}.pdf`;
+      const fileName = `求人票_${displayResult.companyName || "job"}${displayResult.jobTitle ? "_" + displayResult.jobTitle : ""}_${new Date().toISOString().slice(0, 10)}.pdf`;
       try {
         pdf.save(fileName);
       } catch {
@@ -240,11 +272,11 @@ export default function Home() {
   };
 
   const handlePrintPdf = () => {
-    if (!result) return;
-    const title = [cleanText(result.companyName), cleanText(result.jobTitle)].filter(Boolean).join(" - ") || "求人票";
-    const summaryClean = cleanText(result.summary);
+    if (!displayResult) return;
+    const title = [cleanText(displayResult.companyName), cleanText(displayResult.jobTitle)].filter(Boolean).join(" - ") || "求人票";
+    const summaryClean = cleanText(displayResult.summary);
     const sections: { title: string; rows: Record<string, string> }[] = SECTION_DEFS
-      .map(({ key, title }) => ({ title, rows: filterEmptyRows(((result as any)[key] || {}) as Record<string, string>) }))
+      .map(({ key, title }) => ({ title, rows: filterEmptyRows(((displayResult as any)[key] || {}) as Record<string, string>) }))
       .filter((s) => Object.keys(s.rows).length > 0);
 
     const esc = (s: string) =>
@@ -264,7 +296,7 @@ export default function Home() {
             ${Object.entries(s.rows)
               .map(
                 ([k, v]) =>
-                  `<tr><th>${esc(k)}</th><td>${esc(v || "")}</td></tr>`
+                  `<tr><th><div class="cell">${esc(k)}</div></th><td><div class="cell">${esc(v || "")}</div></td></tr>`
               )
               .join("")}
           </tbody>
@@ -278,21 +310,34 @@ export default function Home() {
     )}</title><style>
       @page { size: A4; margin: 14mm; }
       * { box-sizing: border-box; }
-      body { font-family: "Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic","Meiryo","Noto Sans JP",system-ui,sans-serif; color:#222; font-size:12px; line-height:1.6; letter-spacing:0.02em; margin:0; padding:24px; }
+      body { font-family: "Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic","Meiryo","Noto Sans JP",system-ui,sans-serif; color:#222; font-size:12px; line-height:1.5; letter-spacing:0.02em; margin:0; padding:24px; }
       .header { background:#1e40af; color:#fff; padding:16px 20px; border-radius:6px; margin-bottom:20px; }
-      .header h1 { font-size:20px; margin:0 0 4px; line-height:1.5; }
-      .header p { font-size:12px; margin:0; opacity:0.92; line-height:1.6; }
+      .header h1 { font-size:20px; margin:0 0 4px; line-height:1.4; }
+      .header p { font-size:12px; margin:0; opacity:0.92; line-height:1.5; }
       .section { margin-bottom:18px; page-break-inside: avoid; }
-      .section h2 { font-size:13px; color:#1e40af; border-bottom:2px solid #1e40af; padding-bottom:4px; margin:0 0 8px; line-height:1.5; }
-      table { width:100%; border-collapse:collapse; }
-      th, td { padding:10px 14px; font-size:11px; line-height:1.6; vertical-align:middle; border:1px solid #e5e7eb; }
-      th { width:26%; background:#f3f4f6; color:#4b5563; font-weight:700; text-align:left; }
-      td { white-space:pre-wrap; word-break:break-word; }
+      .section h2 { font-size:13px; color:#1e40af; border-bottom:2px solid #1e40af; padding-bottom:4px; margin:0 0 8px; line-height:1.4; }
+      table { width:100%; border-collapse:collapse; table-layout:fixed; }
+      th, td { padding:0; font-size:11px; border:1px solid #e5e7eb; height:1px; }
+      th { width:26%; }
+      th > .cell, td > .cell {
+        display:flex; align-items:center; justify-content:flex-start;
+        padding:12px 14px; min-height:40px; line-height:1.55;
+        box-sizing:border-box;
+      }
+      th > .cell { background:#f3f4f6; color:#4b5563; font-weight:700; min-height:40px; }
+      td > .cell { white-space:pre-wrap; word-break:break-word; }
     </style></head><body>
       <div class="header">
         <h1>${esc(title)}</h1>
         ${summaryClean ? `<p>${esc(summaryClean)}</p>` : ""}
       </div>
+      ${
+        result && result.positions && result.positions.length > 1
+          ? `<p style="font-size:10px;color:#6b7280;margin:-12px 0 16px;">※ 本求人票は同社の募集ポジションのうち「${esc(
+              displayResult.jobTitle
+            )}」の内容です (全${result.positions.length}ポジション中)</p>`
+          : ""
+      }
       ${sectionsHtml}
       <script>
         window.addEventListener('load', function(){
@@ -311,44 +356,75 @@ export default function Home() {
     w.document.close();
   };
 
-  const updateField = (key: keyof JobData, value: string) => {
-    if (!result) return;
-    setResult({ ...result, [key]: value } as JobData);
-  };
-
   type SectionKey = "basicInfo" | "companyInfo" | "jobContent" | "requirements" | "salary" | "workConditions" | "holidays" | "benefits";
 
-  const updateSectionValue = (section: SectionKey, key: string, value: string) => {
+  // ポジション固有のセクションキー
+  const POSITION_SECTIONS: SectionKey[] = ["jobContent", "requirements", "salary", "workConditions"];
+
+  const hasMultiplePositions = (r: JobData | null) =>
+    !!r && Array.isArray(r.positions) && r.positions.length > 1;
+
+  // 複数ポジションモード時は positions[active] を編集
+  const mutateSection = (
+    section: SectionKey,
+    mutator: (rows: Record<string, string>) => Record<string, string>
+  ) => {
     if (!result) return;
-    setResult({ ...result, [section]: { ...result[section], [key]: value } });
+    if (hasMultiplePositions(result) && POSITION_SECTIONS.includes(section)) {
+      const positions = [...(result.positions || [])];
+      const idx = Math.min(activePositionIndex, positions.length - 1);
+      const current = { ...(positions[idx] as any) };
+      current[section] = mutator(current[section] || {});
+      positions[idx] = current;
+      setResult({ ...result, positions });
+    } else {
+      setResult({ ...result, [section]: mutator((result as any)[section] || {}) });
+    }
+  };
+
+  const updateField = (key: keyof JobData, value: string) => {
+    if (!result) return;
+    // jobTitle/summary も複数ポジション時は positions 側を更新
+    if (hasMultiplePositions(result) && (key === "jobTitle" || key === "summary")) {
+      const positions = [...(result.positions || [])];
+      const idx = Math.min(activePositionIndex, positions.length - 1);
+      positions[idx] = { ...positions[idx], [key]: value };
+      setResult({ ...result, positions });
+    } else {
+      setResult({ ...result, [key]: value } as JobData);
+    }
+  };
+
+  const updateSectionValue = (section: SectionKey, key: string, value: string) => {
+    mutateSection(section, (src) => ({ ...src, [key]: value }));
   };
 
   const renameSectionKey = (section: SectionKey, oldKey: string, newKey: string) => {
-    if (!result) return;
     if (!newKey.trim() || oldKey === newKey) return;
-    const src = result[section] || {};
-    if (newKey in src) return; // 競合回避
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(src)) out[k === oldKey ? newKey : k] = v;
-    setResult({ ...result, [section]: out });
+    mutateSection(section, (src) => {
+      if (newKey in src) return src; // 競合回避
+      const out: Record<string, string> = {};
+      for (const [k, v] of Object.entries(src)) out[k === oldKey ? newKey : k] = v;
+      return out;
+    });
   };
 
   const deleteSectionRow = (section: SectionKey, key: string) => {
-    if (!result) return;
-    const src = { ...(result[section] || {}) };
-    delete src[key];
-    setResult({ ...result, [section]: src });
+    mutateSection(section, (src) => {
+      const out = { ...src };
+      delete out[key];
+      return out;
+    });
   };
 
   const addSectionRow = (section: SectionKey) => {
-    if (!result) return;
-    const src = { ...(result[section] || {}) };
-    let base = "新しい項目";
-    let name = base;
-    let i = 2;
-    while (name in src) name = `${base}${i++}`;
-    src[name] = "";
-    setResult({ ...result, [section]: src });
+    mutateSection(section, (src) => {
+      let base = "新しい項目";
+      let name = base;
+      let i = 2;
+      while (name in src) name = `${base}${i++}`;
+      return { ...src, [name]: "" };
+    });
   };
 
   return (
@@ -447,6 +523,35 @@ export default function Home() {
 
       {result && (
         <div className="space-y-6">
+          {/* ポジション切替タブ (2件以上のとき) */}
+          {result.positions && result.positions.length > 1 && (
+            <div className="bg-white rounded-xl border shadow-sm p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-bold text-gray-800">
+                  📌 募集ポジション ({result.positions.length}件)
+                </h3>
+                <p className="text-xs text-gray-500">
+                  タブ切替で各ポジションの求人票を表示・PDF化できます
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {result.positions.map((p, i) => (
+                  <button
+                    key={i}
+                    onClick={() => setActivePositionIndex(i)}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium border transition ${
+                      activePositionIndex === i
+                        ? "bg-blue-600 text-white border-blue-600 shadow-sm"
+                        : "bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100"
+                    }`}
+                  >
+                    {i + 1}. {p.jobTitle || "(職種未取得)"}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="bg-white rounded-xl shadow-sm border p-6 space-y-6">
             <div className="border-b pb-4">
               <p className="text-sm text-blue-600 mb-3">
@@ -456,19 +561,19 @@ export default function Home() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
                 <LabeledInput
                   label="会社名"
-                  value={result.companyName}
+                  value={(displayResult || result).companyName}
                   onChange={(v) => updateField("companyName", v)}
                 />
                 <LabeledInput
                   label="職種"
-                  value={result.jobTitle}
+                  value={(displayResult || result).jobTitle}
                   onChange={(v) => updateField("jobTitle", v)}
                 />
               </div>
-              
+
               <LabeledTextarea
                 label="募集概要"
-                value={result.summary}
+                value={(displayResult || result).summary}
                 onChange={(v) => updateField("summary", v)}
                 rows={3}
               />
@@ -479,7 +584,7 @@ export default function Home() {
               <EditableSection
                 key={key}
                 title={title}
-                rows={(result[key] as Record<string, string>) || {}}
+                rows={((displayResult || result)[key] as Record<string, string>) || {}}
                 onChangeValue={(k, v) => updateSectionValue(key as SectionKey, k, v)}
                 onRenameKey={(oldK, newK) => renameSectionKey(key as SectionKey, oldK, newK)}
                 onDeleteRow={(k) => deleteSectionRow(key as SectionKey, k)}
@@ -538,7 +643,7 @@ export default function Home() {
           </div>
 
           {/* 印刷用隠しレイアウト */}
-          <PrintLayout ref={printRef} data={result} />
+          <PrintLayout ref={printRef} data={displayResult || result} />
         </div>
       )}
     </main>
@@ -594,38 +699,58 @@ const PrintLayout = React.forwardRef<HTMLDivElement, { data: JobData }>(function
           >
             {s.title}
           </div>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
             <tbody>
               {Object.entries(s.rows).map(([k, v]) => (
                 <tr key={k}>
                   <td
                     style={{
                       width: "28%",
-                      background: "#f9fafb",
-                      padding: "10px 14px",
-                      fontWeight: 600,
+                      padding: 0,
                       fontSize: 10,
-                      color: "#374151",
-                      verticalAlign: "middle",
                       border: "1px solid #e5e7eb",
-                      lineHeight: 1.6,
-                      wordBreak: "break-word",
                     }}
                   >
-                    {k}
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "flex-start",
+                        background: "#f9fafb",
+                        color: "#374151",
+                        fontWeight: 600,
+                        padding: "12px 14px",
+                        minHeight: "40px",
+                        lineHeight: 1.55,
+                        wordBreak: "break-word",
+                        boxSizing: "border-box",
+                      }}
+                    >
+                      {k}
+                    </div>
                   </td>
                   <td
                     style={{
-                      padding: "10px 14px",
+                      padding: 0,
                       fontSize: 10,
-                      verticalAlign: "middle",
-                      whiteSpace: "pre-wrap",
                       border: "1px solid #e5e7eb",
-                      lineHeight: 1.6,
-                      wordBreak: "break-word",
                     }}
                   >
-                    {v || ""}
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "flex-start",
+                        padding: "12px 14px",
+                        minHeight: "40px",
+                        whiteSpace: "pre-wrap",
+                        lineHeight: 1.55,
+                        wordBreak: "break-word",
+                        boxSizing: "border-box",
+                      }}
+                    >
+                      {v || ""}
+                    </div>
                   </td>
                 </tr>
               ))}
