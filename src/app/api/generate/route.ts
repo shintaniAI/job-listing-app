@@ -1702,12 +1702,16 @@ export async function POST(req: NextRequest) {
           const smResults = await Promise.allSettled(
             [...sitemapHosts].slice(0, 3).map((h) => fetchSitemapUrls(h, 5000))
           );
+          // sitemap経由では「個別求人票ページ」(給与/選考/休日の生データが載る詳細頁) のみに絞る。
+          // `/recruit/entry/{career|newgrad|potential|midcareer|intern|challenged}/XXX.html` 等。
+          // 単なる `/recruit/job/XXX.html` (職種ハブ) は Stage2 で既に取得済み、除外。
+          const SITEMAP_JOB_RE = /\/(recruit|careers?)\/entry\/(career|newgrad|newgraduate|midcareer|potential|internship|parttime|intern|challenged)\/[a-z0-9-]+\.html?$/i;
           for (const r of smResults) {
             if (r.status === "fulfilled") {
               for (const u of r.value) {
-                if (!alreadyFetched.has(u) && !stage2Candidates.includes(u) && !isUselessAtsUrl(u) && isJobDetailUrl(u)) {
-                  sitemapJobUrls.push(u);
-                }
+                if (alreadyFetched.has(u) || stage2Candidates.includes(u) || isUselessAtsUrl(u)) continue;
+                if (!SITEMAP_JOB_RE.test(u)) continue;
+                sitemapJobUrls.push(u);
               }
             }
           }
