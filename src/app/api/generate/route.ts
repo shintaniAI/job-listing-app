@@ -4,8 +4,9 @@ import { GoogleGenAI } from "@google/genai";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-// 求人媒体（参照禁止リスト）
-const BLOCKED_SITES = [
+// 求人媒体（補助ソース: 公式採用ページ/HPが無い時の参照先として活用）
+// ATS/公式HPより優先度は低いが、ソースとして排除はしない
+const SECONDARY_JOB_SITES = [
   "jp.indeed.com",
   "indeed.com",
   "doda.jp",
@@ -138,7 +139,7 @@ async function extractAtsLinksFromPage(pageUrl: string, timeoutMs = 7000): Promi
             u = `${base.origin}${u}`;
           } catch { continue; }
         }
-        if (/open\.talentio\.com|hrmos\.co/.test(u) && !isBlockedUrl(u)) {
+        if (/open\.talentio\.com|hrmos\.co/.test(u)) {
           if (!/\/apply\/?$/.test(u) && !/\/form\/?$/.test(u)) out.add(u);
         }
       }
@@ -152,9 +153,10 @@ async function extractAtsLinksFromPage(pageUrl: string, timeoutMs = 7000): Promi
 // 後方互換エイリアス
 const extractPagesUrlsFromAtsHome = extractAtsLinksFromPage;
 
-function isBlockedUrl(url: string): boolean {
+// 求人媒体判定（排除ではなく優先度調整用）
+function isSecondaryJobSite(url: string): boolean {
   const lower = url.toLowerCase();
-  return BLOCKED_SITES.some((b) => lower.includes(b));
+  return SECONDARY_JOB_SITES.some((b) => lower.includes(b));
 }
 
 // カタカナ(と長音・促音)をヘボン式ローマ字に変換する簡易コンバータ
@@ -374,20 +376,21 @@ function isUselessAtsUrl(url: string): boolean {
 
 // ATSページ全般(ルート/一覧/詳細いずれも): HTML抽出で追加URLを発掘する価値がある
 function shouldHtmlExtractAts(url: string): boolean {
-  if (isBlockedUrl(url)) return false;
   if (!isKnownAtsHost(url)) return false;
   // pages/XXX 詳細ページからも関連求人リンクを拾えるが、ノイズも多いのでルート/homes のみ対象
   if (isAtsCompanyRootUrl(url)) return true;
   return false;
 }
 
-// URLを優先度でソート: 求人詳細 > 公式採用媒体 > その他
+// URLを優先度でソート: 求人詳細 > 公式採用媒体(ATS/HP) > 求人媒体(Indeed等) > その他
 function sortByPriority(urls: string[]): string[] {
-  return [...urls].sort((a, b) => {
-    const ap = isJobDetailUrl(a) ? 0 : isPreferredHost(a) ? 1 : 2;
-    const bp = isJobDetailUrl(b) ? 0 : isPreferredHost(b) ? 1 : 2;
-    return ap - bp;
-  });
+  const rank = (u: string): number => {
+    if (isJobDetailUrl(u)) return 0;
+    if (isPreferredHost(u)) return 1;
+    if (isSecondaryJobSite(u)) return 2;
+    return 3;
+  };
+  return [...urls].sort((a, b) => rank(a) - rank(b));
 }
 
 // www./非www./末尾スラッシュ違いを正規化（同一ページのURL変種を束ねるため）
@@ -417,9 +420,8 @@ function isCompanyHomepage(url: string): boolean {
   }
 }
 
-// 優先度を考慮しつつホーム系URLも必ず枠を確保する取得対象選定。
-// 順序: (1) 求人詳細/ATS既知ホスト(企業固有) → (2) 会社HPのホームURL → (3) generic /recruit/ 等 → (4) 残り
-// 過去の事故: grounded search が「/recruit/」(404) ばかり返し、ATSルートが p1 4枠から溢れて失敗した。
+// 優先度を考慮しつつ各層に枠を確保する取得対象選定。
+// 順序: (1) 求人詳細/ATS既知ホスト → (2) 求人媒体(Indeed/doda等) → (3) 会社HPホーム → (4) その他
 // Gemini guess が hrmos.co/ や open.talentio.com/ のような会社非依存URLを混ぜることもあるので、
 // ATSホストでも企業スラッグを持たないURLは除外する。
 function pickFetchCandidates(urls: string[], max: number): string[] {
@@ -427,14 +429,16 @@ function pickFetchCandidates(urls: string[], max: number): string[] {
   const usable = urls.filter((u) => !isUselessAtsUrl(u));
   const sorted = sortByPriority(usable);
   const pAts = sorted.filter((u) => isJobDetailUrl(u) || isKnownAtsHost(u));
-  const pHome = sorted.filter((u) => !pAts.includes(u) && isCompanyHomepage(u));
-  const pOther = sorted.filter((u) => !pAts.includes(u) && !pHome.includes(u));
+  const pMedia = sorted.filter((u) => !pAts.includes(u) && isSecondaryJobSite(u));
+  const pHome = sorted.filter((u) => !pAts.includes(u) && !pMedia.includes(u) && isCompanyHomepage(u));
+  const pOther = sorted.filter((u) => !pAts.includes(u) && !pMedia.includes(u) && !pHome.includes(u));
 
   const picked: string[] = [];
   const pushUnique = (u: string) => { if (!picked.includes(u)) picked.push(u); };
-  for (const u of pAts.slice(0, 5)) pushUnique(u);
+  for (const u of pAts.slice(0, 4)) pushUnique(u);
+  for (const u of pMedia.slice(0, 3)) pushUnique(u);
   for (const u of pHome.slice(0, 2)) pushUnique(u);
-  for (const u of pOther.slice(0, 3)) pushUnique(u);
+  for (const u of pOther.slice(0, 2)) pushUnique(u);
   return picked.slice(0, max);
 }
 
@@ -447,7 +451,7 @@ function extractUrls(text: string): string[] {
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
     let u = m[1].replace(/[.,)、。」]+$/, "");
-    if (!isBlockedUrl(u)) out.add(u);
+    out.add(u);
   }
   return [...out];
 }
@@ -508,9 +512,6 @@ async function guessUrlsWithoutGrounding(
     "※ プレースホルダ({slug}, XXX等)を残したURLは絶対禁止。",
     "※ 自信が無い場合は項目を出さなくて良い（空出力OK）。",
     "",
-    "【除外】求人媒体:",
-    BLOCKED_SITES.map((s) => `  - ${s}`).join("\n"),
-    "",
     "出力: URLのみ1行ずつ、最大5件。説明・番号・記号なし。",
   ].join("\n");
 
@@ -564,7 +565,7 @@ async function runGroundedSearch(
         const chunks = meta.groundingChunks || [];
         for (const ch of chunks) {
           const u = ch?.web?.uri;
-          if (u && /^https?:\/\//.test(u) && !isBlockedUrl(u)) grounded.push(u);
+          if (u && /^https?:\/\//.test(u)) grounded.push(u);
         }
         if (Array.isArray(meta.webSearchQueries)) {
           for (const q of meta.webSearchQueries) if (typeof q === "string") searchQueries.push(q);
@@ -618,12 +619,10 @@ async function findOfficialUrlWithGemini(
     `- "${companyName}" site:talentio.com OR site:hrmos.co OR site:wantedly.com`,
     `- "${companyName}" 会社概要 事業内容`,
     "",
-    "【出力したいURL】",
+    "【出力したいURL（優先度順）】",
+    "- 求人詳細ページ（Talentio/HRMOS/Wantedly/Herpの個別URL＝最優先）",
     "- 会社公式サイト（ホーム・採用・会社概要・MVV）",
-    "- 求人詳細ページ（Talentio/HRMOS/Wantedly/Herpの個別URLがあれば最優先）",
-    "",
-    "【除外】以下の求人媒体は含めない:",
-    BLOCKED_SITES.map((s) => `  - ${s}`).join("\n"),
+    "- 求人媒体の該当企業ページ（Indeed/doda/マイナビ転職/リクナビNEXT/エン転職/Green/type/ビズリーチ等）も補助ソースとして出してよい",
     "",
     "見つけたURLを全てhttps://付きで1行ずつ出力（最大12件）。説明・番号・記号不要。",
   ].join("\n");
@@ -753,8 +752,8 @@ const COMMON_RULES = `【絶対ルール】
 - 雛形にないキーは自由に追加してよい（原文にある情報は全部拾う）
 - 値は必ず「文字列」（配列・ネストオブジェクト禁止）
 - 複数項目がある場合は個別キー（例: "主な業務内容1","主な業務内容2"...）に分ける
-- **推測・創作・要約・短縮は完全禁止**。原文に書かれていないことは絶対に書かない／書かれていることを端折らない
-- **Indeed/doda/マイナビ転職/リクナビNEXT/エン転職等の求人媒体に書いてある表現や情報は一切使わない**。採用ページ原文のみを根拠とする
+- **推測・創作・要約・短縮は完全禁止**。提供された原文（公式採用ページ・求人媒体含む）に書かれていないことは絶対に書かない／書かれていることを端折らない
+- 求人媒体（Indeed/doda/マイナビ転職/リクナビNEXT/エン転職/Green/type/ビズリーチ等）もソースに含まれる場合は参照OK。ただし正本タグが付いた公式ページが最優先で、媒体の情報は正本で欠けている項目の補完に使う
 - 原文が長い場合は項目数を増やしてでも全て拾う（値が長くても省略しない）`;
 
 // パートA: 企業全体情報
@@ -1020,12 +1019,6 @@ export async function POST(req: NextRequest) {
     let searchDebug: any = null;
 
     if (companyUrl && /^https?:\/\//.test(companyUrl)) {
-      if (isBlockedUrl(companyUrl)) {
-        return NextResponse.json(
-          { error: `指定URLは求人媒体のため利用できません: ${companyUrl}` },
-          { status: 400 }
-        );
-      }
       targetUrls = [companyUrl];
       // ユーザーが求人詳細ページ(Talentio/HRMOS/Wantedly等)を指定した場合は、
       // その1ソースが最も密度が高い正本なので補助URL探索はスキップし、内容の希釈を防ぐ
@@ -1519,7 +1512,7 @@ export async function POST(req: NextRequest) {
     if (typeof jobData.jobTitle !== "string")
       jobData.jobTitle = flattenValue(jobData.jobTitle);
 
-    jobData.sources = contents.map((c) => c.url).filter((u) => !isBlockedUrl(u));
+    jobData.sources = contents.map((c) => c.url);
 
     if (allPositions.length > 0) {
       jobData.positions = allPositions.map((p) => {
