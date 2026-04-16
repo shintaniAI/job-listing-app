@@ -1066,6 +1066,15 @@ export async function POST(req: NextRequest) {
         contents.push(...kept);
         console.log(`[filter] ATS検証後: ${before}→${contents.length}件`);
       }
+      if (contents.length === 0) {
+        return NextResponse.json(
+          {
+            error: `「${companyName}」の採用ページを特定できませんでした。ATS候補URLが全て会社名マッチ/HTML抽出検証に失敗しました。採用ページURLを直接入力してください。`,
+            _diag: { search: searchDebug, crawl: { stage1HtmlExtracted: stage1AtsHtmlPages } },
+          },
+          { status: 404 }
+        );
+      }
     }
 
     // ---------- Stage 2: Stage1本文からATS/採用系リンクを抽出して追加取得 ----------
