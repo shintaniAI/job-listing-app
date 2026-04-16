@@ -114,43 +114,60 @@ function sortByPriority(urls: string[]): string[] {
   });
 }
 
-// フォールバック: Groundingを使わず知識ベースでURL推測（高速）
+// URLとして有効な行を抽出（末尾の句読点は除去、スキーム無しは補完）
+function extractUrls(text: string): string[] {
+  if (!text) return [];
+  const out = new Set<string>();
+  // 複数URLが同一行にある可能性も拾う
+  const re = /(https?:\/\/[^\s、。」）)\]'"<>]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    let u = m[1].replace(/[.,)、。」]+$/, "");
+    if (!isBlockedUrl(u)) out.add(u);
+  }
+  return [...out];
+}
+
+// フォールバック: Groundingを使わず知識ベースで具体URL推測（高速）
 async function guessUrlsWithoutGrounding(
   ai: GoogleGenAI,
   companyName: string
 ): Promise<{ urls: string[]; usage: any }> {
   const prompt = [
-    `あなたの知識から「${companyName}」の公式採用ページURLを推測してください。`,
+    `「${companyName}」について、あなたの知識から以下の具体URLを推測してください。`,
+    "プレースホルダ({slug}等)を残さず、実在しそうな具体値に埋めてください。分からない項目は空行でOK。",
     "",
-    "【候補パターン】",
-    `- https://open.talentio.com/r/1/c/{slug}/pages/{id}`,
-    `- https://hrmos.co/pages/{slug}/jobs/{id}`,
-    `- https://www.wantedly.com/companies/{slug}/projects`,
-    `- https://{domain}/careers/`,
-    `- https://{domain}/recruit/`,
+    "1. 公式ウェブサイトのホームURL (例: https://example.co.jp/)",
+    "2. 公式サイトの採用ページ (例: https://example.co.jp/careers/ や /recruit/)",
+    "3. 公式サイトの会社概要ページ (例: https://example.co.jp/company/)",
+    "4. Talentio採用ページ (https://open.talentio.com/r/1/c/XXX/ 形式、XXX推測)",
+    "5. HRMOS採用ページ (https://hrmos.co/pages/XXX 形式、XXX推測)",
+    "6. Wantedly企業ページ (https://www.wantedly.com/companies/XXX 形式)",
     "",
-    "【絶対禁止】以下の求人媒体は無視してください:",
+    "【除外】求人媒体:",
     BLOCKED_SITES.map((s) => `  - ${s}`).join("\n"),
     "",
-    "URLのみ1行ずつ、最大6件出力。説明文不要。知らない場合は空でOK。",
+    "出力: URLのみ1行ずつ、最大8件。説明・番号・記号なし。",
   ].join("\n");
 
-  const result = await withTimeout(
-    ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: { temperature: 0, maxOutputTokens: 500 },
-    }),
-    7000,
-    "Gemini(URLフォールバック推測)"
-  );
-  const text = result.text || "";
-  const urls = text
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => /^https?:\/\//.test(l))
-    .filter((l) => !isBlockedUrl(l));
-  return { urls: urls.slice(0, 6), usage: (result as any).usageMetadata || {} };
+  try {
+    const result = await withTimeout(
+      ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: prompt,
+        config: { temperature: 0, maxOutputTokens: 600, thinkingConfig: { thinkingBudget: 0 } } as any,
+      }),
+      7000,
+      "Gemini(URL推測)"
+    );
+    const urls = extractUrls(result.text || "")
+      .filter((u) => !/\{[a-z_-]+\}/i.test(u)) // プレースホルダが残っているものは捨てる
+      .slice(0, 8);
+    return { urls, usage: (result as any).usageMetadata || {} };
+  } catch (e: any) {
+    console.log(`[search] 知識ベース推測失敗: ${e.message}`);
+    return { urls: [], usage: {} };
+  }
 }
 
 // 1本のGrounded検索を実行してURLを抽出（失敗時は空配列）
@@ -171,11 +188,7 @@ async function runGroundedSearch(
       `Gemini(${label})`
     );
     const text = result.text || "";
-    const direct = text
-      .split(/\r?\n/)
-      .map((l: string) => l.trim())
-      .filter((l: string) => /^https?:\/\//.test(l))
-      .filter((l: string) => !isBlockedUrl(l));
+    const direct = extractUrls(text);
 
     const grounded: string[] = [];
     try {
@@ -189,8 +202,10 @@ async function runGroundedSearch(
       }
     } catch {}
 
+    const merged = Array.from(new Set([...direct, ...grounded]));
+    console.log(`[search] ${label} 抽出: 本文${direct.length} + grounding${grounded.length} → 計${merged.length}件`);
     return {
-      urls: Array.from(new Set([...direct, ...grounded])),
+      urls: merged,
       usage: (result as any).usageMetadata || {},
     };
   } catch (e: any) {
@@ -211,38 +226,41 @@ async function findOfficialUrlWithGemini(
   const jobClause = jobTitle ? `特に「${jobTitle}」の個別求人ページがあれば最優先。` : "";
 
   const atsPrompt = [
-    `「${companyName}」の**求人詳細ページ**（個別求人のURL）をGoogle検索で探してください。${jobClause}`,
+    `「${companyName}」の採用関連URLをGoogle検索で探してください。${jobClause}`,
     "",
-    "【必ず個別求人IDを含むURLを探す】",
-    `- site:open.talentio.com 形式: /r/{n}/c/{slug}/pages/{数字ID}`,
-    `- site:hrmos.co 形式: /pages/{slug}/jobs/{数字ID}`,
-    `- site:www.wantedly.com 形式: /projects/{数字ID}`,
-    `- site:herp.careers 形式: /v1/{slug}/{slug}`,
-    `- 会社独自ドメイン: /careers/jobs/{id} /recruit/jobs/{id} の個別求人`,
+    "【最優先】求人詳細ページ（個別求人ID付きURLがあれば必ず）:",
+    `- open.talentio.com/r/*/c/*/pages/NNN`,
+    `- hrmos.co/pages/*/jobs/NNN`,
+    `- www.wantedly.com/projects/NNN`,
+    `- herp.careers/v1/*/*`,
+    `- 会社独自ドメインの /careers/jobs/ /recruit/jobs/ 個別ページ`,
     "",
-    "※トップやカテゴリページ（例: /recruit/ だけ）はNG。**必ず個別求人ID付きURL**を集める",
-    "※複数職種があれば全ての個別求人URLを集める",
+    "【次点】ATS採用サイトのルート/ブランドページも可:",
+    `- open.talentio.com/r/*/c/* のカンパニールート`,
+    `- hrmos.co/pages/* のブランドルート`,
+    `- www.wantedly.com/companies/* の企業ページ`,
     "",
-    "【除外（求人媒体）】",
+    "【除外】以下の求人媒体は含めない:",
     BLOCKED_SITES.map((s) => `  - ${s}`).join("\n"),
     "",
-    "URLのみ1行ずつ最大8件。説明・番号不要。",
+    "見つけたURLを全てhttps://付きで1行ずつ出力（最大10件）。説明・番号・記号不要。",
   ].join("\n");
 
   const corpPrompt = [
-    `「${companyName}」の**公式サイト内**の採用／会社紹介ページをGoogle検索で探してください。`,
+    `「${companyName}」の**公式ウェブサイト**（会社自身のドメイン）の採用・会社情報ページをGoogle検索してください。`,
     "",
-    "【集めて欲しいページ】",
-    "- 公式の採用／キャリア／リクルートページ（トップ・募集要項）",
-    "- 会社概要・事業内容ページ",
-    "- ミッション／ビジョン／バリュー（MVV）・経営理念ページ",
-    "- 福利厚生・働く環境・制度紹介ページ",
-    "- 代表メッセージ・社員インタビュー・カルチャー紹介",
+    "【集めるページ】",
+    "- 公式サイトのホーム（トップページ）",
+    "- 採用／キャリア／リクルート／募集ページ",
+    "- 会社概要・事業内容・代表メッセージ",
+    "- ミッション／ビジョン／バリュー・経営理念",
+    "- 福利厚生・働く環境",
+    "- 社員インタビュー・カルチャー紹介",
     "",
-    "【除外（求人媒体）】",
+    "【除外】以下の求人媒体は含めない:",
     BLOCKED_SITES.map((s) => `  - ${s}`).join("\n"),
     "",
-    "URLのみ1行ずつ最大8件。",
+    "見つけたURLを全てhttps://付きで1行ずつ出力（最大10件）。",
   ].join("\n");
 
   const [atsRes, corpRes, guessRes] = await Promise.all([
