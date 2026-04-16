@@ -30,12 +30,22 @@ const PREFERRED_HOSTS = [
   "hrmos.co",
   "wantedly.com",
   "herp.careers",
+  // 海外系ATS (メルカリ/LINEヤフー/スタートアップの多くが利用)
+  "boards.greenhouse.io",
+  "greenhouse.io",
+  "jobs.lever.co",
+  "lever.co",
+  "apply.workable.com",
+  "workable.com",
+  "jobs.smartrecruiters.com",
+  "smartrecruiters.com",
   "careers",
   "recruit",
 ];
 
 // 「求人詳細ページっぽい」URLパターン
-// ATS(Talentio/HRMOS/Wantedly/HERP) だけでなく、企業HP自前の個別職種ページも対象に含める
+// ATS(Talentio/HRMOS/Wantedly/HERP/Greenhouse/Lever/Workable/SmartRecruiters)
+// だけでなく、企業HP自前の個別職種ページも対象に含める
 // (例: cybozu.co.jp/recruit/job/engineering.html, example.com/careers/engineer/)
 const JOB_DETAIL_PATTERNS = [
   /open\.talentio\.com\/r\/[^/]+\/c\/[^/]+\/pages\/\d+/i,
@@ -43,6 +53,11 @@ const JOB_DETAIL_PATTERNS = [
   /hrmos\.co\/pages\/[^/]+\/jobs\/\d+/i,
   /wantedly\.com\/projects\/\d+/i,
   /herp\.careers\/v\d+\/[^/]+\/[^/]+/i,
+  // 海外系ATS (Greenhouse/Lever/Workable/SmartRecruiters)
+  /boards\.greenhouse\.io\/[^/]+\/jobs\/\d+/i,
+  /jobs\.lever\.co\/[^/]+\/[0-9a-f-]{8,}/i,
+  /apply\.workable\.com\/[^/]+\/j\/[A-Z0-9]+/i,
+  /jobs\.smartrecruiters\.com\/[^/]+\/\d+/i,
   // HP内の職種別詳細ページ: /recruit/job/XXX / /careers/YYY/ / /saiyou/jobs/ZZZ 等
   // 末尾が /index 以外のパスセグメントまたは .html で終わるもの
   /\/(recruit|careers?|saiyou?|hiring|jobs?)\/(job|position|occupation|role)\/[a-z0-9-]+/i,
@@ -275,11 +290,21 @@ async function extractAtsLinksFromPage(pageUrl: string, timeoutMs = 7000): Promi
     const html = await fetchJinaReaderHtml(pageUrl, timeoutMs);
     const out = new Set<string>();
     // homes/XXX と pages/XXX の両方を拾う（ATSルートから homes→pages 多段で辿るため）
+    // Greenhouse/Lever/Workable/SmartRecruiters の求人詳細URLも拾う
     const patterns = [
       /data-link-url="([^"]*\/(?:pages|homes)\/\d+[^"]*)"/g,
       /"publishedUrl"\s*:\s*"([^"]*\/(?:pages|homes)\/\d+[^"]*)"/g,
       /href="([^"]*\/(?:pages|homes)\/\d+[^"]*)"/g,
       /"url"\s*:\s*"([^"]*\/(?:pages|homes)\/\d+[^"]*)"/g,
+      // Greenhouse: boards.greenhouse.io/{co}/jobs/NNNN
+      /href="([^"]*boards\.greenhouse\.io\/[^/]+\/jobs\/\d+[^"]*)"/g,
+      /"absolute_url"\s*:\s*"([^"]*\/jobs\/\d+[^"]*)"/g,
+      // Lever: jobs.lever.co/{co}/{uuid}
+      /href="([^"]*jobs\.lever\.co\/[^/]+\/[0-9a-f-]{8,}[^"]*)"/g,
+      // Workable: apply.workable.com/{co}/j/{ID}
+      /href="([^"]*apply\.workable\.com\/[^/]+\/j\/[A-Z0-9]+[^"]*)"/g,
+      // SmartRecruiters: jobs.smartrecruiters.com/{co}/NNNNN
+      /href="([^"]*jobs\.smartrecruiters\.com\/[^/]+\/\d+[^"]*)"/g,
     ];
     for (const re of patterns) {
       let m: RegExpExecArray | null;
@@ -292,7 +317,7 @@ async function extractAtsLinksFromPage(pageUrl: string, timeoutMs = 7000): Promi
             u = `${base.origin}${u}`;
           } catch { continue; }
         }
-        if (/open\.talentio\.com|hrmos\.co/.test(u)) {
+        if (/open\.talentio\.com|hrmos\.co|boards\.greenhouse\.io|jobs\.lever\.co|apply\.workable\.com|jobs\.smartrecruiters\.com/.test(u)) {
           if (!/\/apply\/?$/.test(u) && !/\/form\/?$/.test(u)) out.add(u);
         }
       }
@@ -509,6 +534,15 @@ const KNOWN_ATS_HOSTS = [
   "hrmos.co",
   "herp.careers",
   "wantedly.com",
+  // 海外系ATS (メルカリ/LINEヤフー/各スタートアップが利用)
+  "boards.greenhouse.io",
+  "greenhouse.io",
+  "jobs.lever.co",
+  "lever.co",
+  "apply.workable.com",
+  "workable.com",
+  "jobs.smartrecruiters.com",
+  "smartrecruiters.com",
 ];
 function isKnownAtsHost(url: string): boolean {
   try {
@@ -529,6 +563,14 @@ function isAtsCompanyRootUrl(url: string): boolean {
   if (/^https?:\/\/hrmos\.co\/pages\/[^/]+\/?$/i.test(url)) return true;
   // Wantedly: /companies/{slug}  (/projects/NNN 無し)
   if (/^https?:\/\/(www\.)?wantedly\.com\/companies\/[^/]+\/?$/i.test(url)) return true;
+  // Greenhouse: boards.greenhouse.io/{co}  (/jobs/N 無し)
+  if (/^https?:\/\/boards\.greenhouse\.io\/[^/]+\/?$/i.test(url)) return true;
+  // Lever: jobs.lever.co/{co}  (/{uuid} 無し)
+  if (/^https?:\/\/jobs\.lever\.co\/[^/]+\/?$/i.test(url)) return true;
+  // Workable: apply.workable.com/{co}  (/j/{ID} 無し)
+  if (/^https?:\/\/apply\.workable\.com\/[^/]+\/?$/i.test(url)) return true;
+  // SmartRecruiters: jobs.smartrecruiters.com/{co}  (/{id} 無し)
+  if (/^https?:\/\/jobs\.smartrecruiters\.com\/[^/]+\/?$/i.test(url)) return true;
   return false;
 }
 
@@ -557,6 +599,26 @@ function extractAtsCompanySlug(url: string): string | null {
     }
     if (host.endsWith("herp.careers")) {
       const m = p.match(/^\/v\d+\/([^/]+)/);
+      if (m) return m[1].toLowerCase();
+    }
+    // 海外ATS: Greenhouse (boards.greenhouse.io/{company}/jobs/N or /{company})
+    if (host === "boards.greenhouse.io" || host.endsWith(".greenhouse.io")) {
+      const m = p.match(/^\/([^/]+)/);
+      if (m) return m[1].toLowerCase();
+    }
+    // Lever (jobs.lever.co/{company}/{uuid})
+    if (host === "jobs.lever.co" || host.endsWith(".lever.co")) {
+      const m = p.match(/^\/([^/]+)/);
+      if (m) return m[1].toLowerCase();
+    }
+    // Workable (apply.workable.com/{company}/j/{id} or /{company})
+    if (host === "apply.workable.com" || host.endsWith(".workable.com")) {
+      const m = p.match(/^\/([^/]+)/);
+      if (m) return m[1].toLowerCase();
+    }
+    // SmartRecruiters (jobs.smartrecruiters.com/{company}/... or careers-page at careers.smartrecruiters.com/{company})
+    if (host.endsWith("smartrecruiters.com")) {
+      const m = p.match(/^\/([^/]+)/);
       if (m) return m[1].toLowerCase();
     }
     return null;
@@ -877,7 +939,8 @@ async function findOfficialUrlWithGemini(
     "- 検索結果が無い/自信が無い場合は空出力する（間違ったURLを返すより空の方が良い）",
     "",
     "【検索ヒント：これらのクエリを内部で試してOK。上から順に優先】",
-    `- "${companyName}" site:talentio.com OR site:hrmos.co OR site:wantedly.com OR site:herp.careers  (ATS最優先)`,
+    `- "${companyName}" site:talentio.com OR site:hrmos.co OR site:wantedly.com OR site:herp.careers  (国内ATS最優先)`,
+    `- "${companyName}" site:boards.greenhouse.io OR site:jobs.lever.co OR site:apply.workable.com OR site:jobs.smartrecruiters.com  (海外ATS: メルカリ/LINEヤフー等が利用)`,
     `- "${companyName}" 採用 OR recruit OR careers`,
     `- "${companyName}" 採用情報 OR 募集要項 OR 職務内容`,
     `- "${companyName}" 公式サイト OR コーポレートサイト`,
@@ -885,8 +948,8 @@ async function findOfficialUrlWithGemini(
     `- "${companyName}" site:indeed.com OR site:doda.jp OR site:mynavi.jp OR site:rikunabi.com  (求人媒体: ATS/公式と併せて必ず取る)`,
     "",
     "【出力したいURL（優先度順）】",
-    "1. 求人詳細ページ（Talentio/HRMOS/Wantedly/Herpの個別URL）＝最優先",
-    "2. ATS企業ルート（open.talentio.com/r/../c/../ や hrmos.co/pages/.. など個別URLがなければ必須）",
+    "1. 求人詳細ページ（Talentio/HRMOS/Wantedly/Herp/Greenhouse/Lever/Workable/SmartRecruitersの個別URL）＝最優先",
+    "2. ATS企業ルート（open.talentio.com/r/../c/../ や hrmos.co/pages/.. や boards.greenhouse.io/{co} や apply.workable.com/{co} など個別URLがなければ必須）",
     "3. 会社公式サイトの採用/キャリアページ（/careers/ /recruit/ /saiyou/ 等）",
     "4. 会社公式サイト（ホーム・会社概要・MVV）＝HP追加情報用",
     "5. 求人媒体の該当企業ページ（Indeed/doda/マイナビ/リクナビ/エン/Green等）＝募集背景・求職者訴求文など追加情報用として積極的に含める",
