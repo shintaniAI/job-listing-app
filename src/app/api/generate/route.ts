@@ -2,7 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+// Pro モデル使用により search+fetch+gen で 60s を超える可能性があるため 90s に延長
+// (Vercel Pro プランなら 300s まで可能。Hobby で deploy エラーになるなら 60 に戻す)
+export const maxDuration = 90;
 
 // 求人媒体（補助ソース: 公式採用ページ/HPが無い時の参照先として活用）
 // ATS/公式HPより優先度は低いが、ソースとして排除はしない
@@ -879,7 +881,16 @@ async function detectPositionsWithGemini(
 }
 
 // ====== プロンプト（talentio/HRMOS 実物ベースに再設計） ======
-const COMMON_RULES = `【絶対ルール】
+const COMMON_RULES = `【最重要ルール: ハルシネーション完全禁止】
+- **提供された原文(採用ページ/HP/求人媒体)に書かれていない情報は、いかなる形でも出力しない**。推測・創作・一般化・類推・常識による補完・他社事例からの流用は**全て禁止**
+- 原文に書かれていない内容を書くくらいなら、そのキーは空文字列 "" にする
+- 「こういう会社はこうだろう」「この業界なら〜が普通」等の**業界知識や一般常識は絶対に持ち込まない**
+- 原文の文言を**言い換え・要約・改変しない**。そのままの文字列を転記すること
+- 数値・金額・時間・固有名詞は原文通り(改変禁止、丸め禁止、四捨五入禁止)
+- 原文内で矛盾する記述がある場合は、より新しい/詳細な方を採用し、メモとして両方を書く
+- 会社名・サービス名・人物名は原文にあるスペル・漢字・カタカナで書く
+
+【絶対ルール】
 - **採用ページ最優先・網羅**: 「=== PRIMARY SOURCE (採用ページ／...)」タグが付いたソースは採用ページである。そこに書かれている情報は項目として**全て漏らさず**JSONに転記する（章・見出し・箇条書き・表・制度一覧・数値・金額・時間帯など全て）。タグがない場合は先頭の「=== SOURCE URL: ...」を採用ページとみなす
 - **HP等は追加情報として取り込む**: 「=== 補助ソース:」(HP・会社概要・求人媒体等)および2件目以降のSOURCE URLは、**採用ページを補完する追加情報**として扱う。採用ページに無い情報(会社概要・MVV・事業詳細・代表メッセージ・沿革 等)があれば積極的に取り込み、既存キーの補足や新しいキーの追加に使ってよい。ただし採用ページに書いてある項目の値を補助ソースの内容で上書きしてはいけない
 - 原文の章見出し（「求人概要」「職務内容」「応募資格」「報酬」「諸手当」「休日・休暇」「福利厚生」「事業概要」「ミッション」「ビジョン」「バリュー」「カルチャー」等）を全てカバーする
@@ -1038,10 +1049,11 @@ async function generateCompanyPart(
         responseMimeType: "application/json",
         temperature: 0.1,
         maxOutputTokens: 20000,
-        thinkingConfig: { thinkingBudget: 0 }, // Proでも thinking 無効で高速化
+        // Pro は thinking 必須。最小の 128 に抑えて速度を確保
+        thinkingConfig: { thinkingBudget: 128 },
       } as any,
     }),
-    32000,
+    40000,
     "Gemini(企業パート生成)"
   );
 
@@ -1087,10 +1099,10 @@ async function generatePositionPart(
         responseMimeType: "application/json",
         temperature: 0.1,
         maxOutputTokens: 20000,
-        thinkingConfig: { thinkingBudget: 0 },
+        thinkingConfig: { thinkingBudget: 128 },
       } as any,
     }),
-    32000,
+    40000,
     "Gemini(ポジションパート生成)"
   );
 

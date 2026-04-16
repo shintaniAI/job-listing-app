@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 90;
 
 // 旧BLOCKED_SITES: 求人媒体は排除せず補助ソースとして受け入れる方針に変更
 
@@ -70,6 +70,12 @@ async function fetchJinaReader(url: string, timeoutMs = 20000): Promise<string> 
 }
 
 const POSITION_INSTRUCTION = `あなたは採用ページ原文から求人票を作成する専門家です。与えられた**企業公式の採用ページ全文**と「対象ポジション名」から、そのポジション**固有**の4セクションをJSONで返してください。
+
+【最重要ルール: ハルシネーション完全禁止】
+- **提供された原文に書かれていない情報は、いかなる形でも出力しない**。推測・創作・業界知識・一般常識による補完は**全て禁止**
+- 原文に書かれていない内容を書くくらいなら、そのキーは空文字列 "" にする
+- 数値・金額・時間・固有名詞・会社名・サービス名は原文通りに転記(改変・要約・言い換え禁止)
+- 原文を言い換えず、そのままの文字列をコピーしてください
 
 【絶対ルール】
 - **採用ページ最優先・網羅**: 先頭の「=== SOURCE URL:」ソース(Talentio/HRMOS/Wantedly等の採用ページ)は正本。そこに書かれているポジション関連の情報は**全て漏らさず**転記する（章見出し・箇条書き・表・制度一覧・数値・金額・時間帯を全てカバー）
@@ -199,10 +205,11 @@ export async function POST(req: NextRequest) {
           responseMimeType: "application/json",
           temperature: 0.1,
           maxOutputTokens: 12000,
-          thinkingConfig: { thinkingBudget: 0 },
+          // Pro は thinking 必須なので最小値
+          thinkingConfig: { thinkingBudget: 128 },
         } as any,
       }),
-      45000,
+      50000,
       "Gemini(ポジション詳細生成)"
     );
 
