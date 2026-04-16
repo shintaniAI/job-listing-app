@@ -1774,10 +1774,14 @@ export async function POST(req: NextRequest) {
     }
 
     // ---------- content-aware ランキング & 予算配分 ----------
-    // スコア: 求人詳細ページ(1e6) >> 公式採用媒体ホスト(1e4) >> 本文長
+    // スコア: 給与等の生データが載る個別求人票(+2e6) > 求人詳細ページ(+1e6) > 公式採用媒体ホスト(+1e4) > 本文長
+    // Cybozu のような `/recruit/entry/career/XXX.html` 形式の個別求人票は
+    // 給与/選考/休暇の具体データが集約されるため PRIMARY に優先採用する。
+    const ENTRY_JOB_RE = /\/(recruit|careers?)\/entry\/(career|newgrad|newgraduate|midcareer|potential|internship|parttime|intern|challenged)\/[a-z0-9-]+\.html?$/i;
     const scored = contents.map((c) => ({
       ...c,
       score:
+        (ENTRY_JOB_RE.test(c.url) ? 2_000_000 : 0) +
         (isJobDetailUrl(c.url) ? 1_000_000 : 0) +
         (isPreferredHost(c.url) ? 10_000 : 0) +
         c.text.length,
