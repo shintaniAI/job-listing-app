@@ -2,9 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
 
 export const runtime = "nodejs";
-// Deep Research (googleSearch + urlContext + Pro思考) は 60-90s 要することがある。
-// 120s に延長 (Vercel Pro プラン必須。Hobby で deploy エラーになるなら 60 に戻す)。
-export const maxDuration = 120;
+// Vercel Hobby プランは 60s 上限で強制タイムアウト(504)。
+// Deep Research は 38s タイムアウト + 軽量モデル優先で 60s 予算内に完走させる。
+// Pro プランなら 300s まで拡張可能。必要なら 120 に上げる。
+export const maxDuration = 60;
 
 // 求人媒体（補助ソース: 公式採用ページ/HPが無い時の参照先として活用）
 // ATS/公式HPより優先度は低いが、ソースとして排除はしない
@@ -1445,12 +1446,13 @@ async function generateWithDeepResearch(
     "}",
   ].filter((s) => s !== "").join("\n");
 
-  // Gemini 3.1 Pro Preview を優先（最高品質・200万トークンコンテキスト・Deep Research対応）
-  // フォールバック: 3-flash-preview → 2.5-pro (ツール併用可能)
+  // Vercel Hobby 60s 上限の中で完走させる構成。
+  // gemini-3-flash-preview: Gemini 3 系の高速モデル。ツール対応で 25-40s。
+  // gemini-2.5-flash: 保険（3 系失敗時）。こちらもツール対応。
+  // pro 系は 55-75s かかり Hobby で完走困難なため、時間予算管理側に委ねる。
   const DEEP_RESEARCH_MODELS = [
-    "gemini-3.1-pro-preview",
     "gemini-3-flash-preview",
-    "gemini-2.5-pro",
+    "gemini-2.5-flash",
   ];
 
   let lastErr: any;
@@ -1465,12 +1467,12 @@ async function generateWithDeepResearch(
           config: {
             tools: [{ googleSearch: {} }, { urlContext: {} }],
             temperature: 0.1,
-            maxOutputTokens: 32000,
-            // Pro 系は thinkingBudget を強めに設定（自律エージェント挙動を有効化）
-            thinkingConfig: { thinkingBudget: model.includes("pro") ? 4096 : 1024 },
+            maxOutputTokens: 16000,
+            // Flash系は thinking 0 でもツール使用と構造化出力が動作。速度最優先。
+            thinkingConfig: { thinkingBudget: 0 },
           } as any,
         }),
-        75000, // 自律リサーチは時間がかかる（検索 + 最大20URLの訪問）
+        45000, // Hobby 60s 予算のうち 45s を Deep Research に割当 (Flash なら 25-40s で完走)
         `DeepResearch[${model}]`
       );
 
@@ -1650,13 +1652,18 @@ export async function POST(req: NextRequest) {
     // Step 0: Deep Research Agent を最優先で試す
     // Gemini 3.1 Pro + googleSearch + urlContext により、
     // モデル自身が検索→URL訪問→情報統合→JSON化を一気通貫で実行。
-    // 成功して十分な情報量があれば即返却。失敗/情報不足なら従来パスに落とす。
+    //
+    // 時間予算: Vercel Hobby 60s → DR に 40s 割当、残り20s をフォールバックに。
+    // DR の結果が薄くても、残り予算が少ない場合はそのまま返却して 504 回避。
     // ============================================================
-    const DEEP_RESEARCH_MIN_FIELDS = 30; // この数以上のフィールドが埋まれば deep research のみで確定
+    const TOTAL_BUDGET_MS = 55000; // Hobby 60s の 5s 手前で必ず返す
+    const DEEP_RESEARCH_MIN_FIELDS = 20; // これ以上埋まれば DR のみ採用 (20項目でも前世代より十分リッチ)
+    const FALLBACK_MIN_BUDGET_MS = 25000; // フォールバック(Jina+Split) に必要な最小残予算
+    let drResult: { jobData: any; usage: any; debug: any } | null = null;
     try {
       const seedUrls = companyUrl && /^https?:\/\//.test(companyUrl) ? [companyUrl] : [];
       console.log(`[deep-research] 起動: companyName="${companyName}" jobTitle="${jobTitle}" seeds=${seedUrls.length}`);
-      const dr = await generateWithDeepResearch(
+      drResult = await generateWithDeepResearch(
         ai,
         companyName,
         jobTitle,
@@ -1664,29 +1671,45 @@ export async function POST(req: NextRequest) {
         seedUrls,
         jobTitle || undefined
       );
-      const validCount = countValidFields(dr.jobData);
-      console.log(`[deep-research] 完了: 有効フィールド=${validCount}`);
-      if (validCount >= DEEP_RESEARCH_MIN_FIELDS) {
-        const inTok = dr.usage.promptTokenCount || 0;
-        const outTok = dr.usage.candidatesTokenCount || 0;
+      const validCount = countValidFields(drResult.jobData);
+      const elapsed = Date.now() - startedAt;
+      const remaining = TOTAL_BUDGET_MS - elapsed;
+      console.log(`[deep-research] 完了: 有効フィールド=${validCount}, elapsed=${elapsed}ms, remaining=${remaining}ms`);
+
+      // 十分な情報量 OR 残予算不足なら DR 結果で即返却
+      if (validCount >= DEEP_RESEARCH_MIN_FIELDS || remaining < FALLBACK_MIN_BUDGET_MS) {
+        const inTok = drResult.usage.promptTokenCount || 0;
+        const outTok = drResult.usage.candidatesTokenCount || 0;
         const meta = {
-          engine: `deep-research (${dr.debug.model})`,
-          elapsed_ms: Date.now() - startedAt,
-          visited_urls: dr.debug.visitedUrls,
+          engine: `deep-research (${drResult.debug.model})`,
+          elapsed_ms: elapsed,
+          visited_urls: drResult.debug.visitedUrls,
           valid_fields: validCount,
           tokens: { input: inTok, output: outTok },
-          // 3.1-pro-preview: input $2/1M, output $12/1M (概算)
           cost: {
             input_usd: +((inTok / 1_000_000) * 2).toFixed(6),
             output_usd: +((outTok / 1_000_000) * 12).toFixed(6),
           },
+          budget_decision: remaining < FALLBACK_MIN_BUDGET_MS ? "time_budget_exhausted" : "fields_sufficient",
         };
-        (dr.jobData as any)._meta = meta;
-        return NextResponse.json(dr.jobData);
+        (drResult.jobData as any)._meta = meta;
+        return NextResponse.json(drResult.jobData);
       }
-      console.log(`[deep-research] フィールド不足(${validCount}<${DEEP_RESEARCH_MIN_FIELDS})→従来パスにフォールバック`);
+      console.log(`[deep-research] フィールド不足(${validCount}<${DEEP_RESEARCH_MIN_FIELDS})かつ残予算あり(${remaining}ms)→従来パスにフォールバック`);
     } catch (e: any) {
-      console.log(`[deep-research] 失敗→従来パスにフォールバック: ${e.message}`);
+      const elapsed = Date.now() - startedAt;
+      const remaining = TOTAL_BUDGET_MS - elapsed;
+      console.log(`[deep-research] 失敗(${elapsed}ms elapsed, ${remaining}ms remaining): ${e.message}`);
+      // 残予算が足りなければフォールバックもせずエラー返却
+      if (remaining < FALLBACK_MIN_BUDGET_MS) {
+        return NextResponse.json(
+          {
+            error: "生成処理が時間内に完了しませんでした。採用ページURLを直接入力して再試行してください。",
+            _diag: { elapsed_ms: elapsed, deep_research_error: e.message },
+          },
+          { status: 504 }
+        );
+      }
     }
 
     // Step 1: 対象URLを確定
