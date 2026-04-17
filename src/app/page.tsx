@@ -500,7 +500,7 @@ export default function Home() {
 
   return (
     <main className="max-w-4xl mx-auto px-4 py-12">
-      <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成アプリ v2.1</h1>
+      <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成アプリ v2.2.1</h1>
       <p className="text-center text-gray-600 mb-2">
         企業の公式採用ページ（Talentio / HRMOS / Wantedly / 自社採用HP）を優先取得し、HP・求人媒体（Indeed / doda / マイナビ転職 / リクナビNEXT / エン転職 等）も追加情報として参照して求人票を生成します。
       </p>
