@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
+import { assertPublicUrl, isSsrfBlocked } from "@/lib/ssrf-guard";
+import { checkRateLimit, rateLimitResponse } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 // Vercel Hobby プランは 60s 上限で強制タイムアウト(504)。
@@ -220,6 +222,7 @@ async function fetchJinaReader(url: string, timeoutMs = 20000): Promise<string> 
 // Jina の代替: 直接URLをfetchしてHTMLから本文テキストを抽出する
 // Jina が 429 の時のフォールバックとしてのみ使用 (品質は Jina の markdown 変換より落ちる)
 async function fetchDirectAndExtractText(url: string, timeoutMs = 8000): Promise<string> {
+  await assertPublicUrl(url);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -360,6 +363,11 @@ async function fetchSitemapUrls(hostUrl: string, timeoutMs = 5000): Promise<stri
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), timeoutMs);
         try {
+          try {
+            await assertPublicUrl(smUrl);
+          } catch {
+            return;
+          }
           const res = await fetch(smUrl, {
             method: "GET",
             headers: {
@@ -1627,6 +1635,9 @@ async function generateJobJsonSplit(
 
 // ---------- メイン ----------
 export async function POST(req: NextRequest) {
+  const rl = checkRateLimit(req, { scope: "generate", limit: 10, windowMs: 60_000 });
+  if (!rl.ok) return rateLimitResponse(rl);
+
   let body: any;
   try {
     body = await req.json();
@@ -1642,6 +1653,20 @@ export async function POST(req: NextRequest) {
   const companyUrl: string = cap(body.companyUrl, 2000).trim();
   const jobTitle: string = cap(body.jobTitle).trim();
   const salary: string = cap(body.salary).trim();
+
+  if (companyUrl && /^https?:\/\//.test(companyUrl)) {
+    try {
+      await assertPublicUrl(companyUrl);
+    } catch (e) {
+      if (isSsrfBlocked(e)) {
+        return NextResponse.json(
+          { error: "指定されたURLは利用できません。公開されている採用ページのURLを入力してください。" },
+          { status: 400 }
+        );
+      }
+      throw e;
+    }
+  }
 
   const startedAt = Date.now();
 

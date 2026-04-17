@@ -160,17 +160,21 @@ export default function Home() {
       }
       if (!res.ok) throw new Error(data?.error || `ポジション詳細の生成に失敗しました (${res.status})`);
 
-      const newPositions = [...(result.positions || [])];
-      newPositions[idx] = {
-        jobTitle: data.jobTitle || p.jobTitle,
-        summary: data.summary || "",
-        jobContent: data.jobContent || {},
-        requirements: data.requirements || {},
-        salary: data.salary || {},
-        workConditions: data.workConditions || {},
-        selection: data.selection || {},
-      };
-      setResult({ ...result, positions: newPositions });
+      setResult((prev) => {
+        if (!prev) return prev;
+        const base = prev.positions?.[idx] ?? p;
+        const newPositions = [...(prev.positions || [])];
+        newPositions[idx] = {
+          jobTitle: data.jobTitle || base.jobTitle,
+          summary: data.summary || "",
+          jobContent: data.jobContent || {},
+          requirements: data.requirements || {},
+          salary: data.salary || {},
+          workConditions: data.workConditions || {},
+          selection: data.selection || {},
+        };
+        return { ...prev, positions: newPositions };
+      });
     } catch (err: any) {
       setError(err.message);
     } finally {
