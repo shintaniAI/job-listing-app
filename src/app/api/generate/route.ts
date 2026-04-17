@@ -2,9 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
 
 export const runtime = "nodejs";
-// Pro モデル使用により search+fetch+gen で 60s を超える可能性があるため 90s に延長
-// (Vercel Pro プランなら 300s まで可能。Hobby で deploy エラーになるなら 60 に戻す)
-export const maxDuration = 90;
+// Deep Research (googleSearch + urlContext + Pro思考) は 60-90s 要することがある。
+// 120s に延長 (Vercel Pro プラン必須。Hobby で deploy エラーになるなら 60 に戻す)。
+export const maxDuration = 120;
 
 // 求人媒体（補助ソース: 公式採用ページ/HPが無い時の参照先として活用）
 // ATS/公式HPより優先度は低いが、ソースとして排除はしない
@@ -1382,6 +1382,198 @@ async function generatePositionPart(
   return { data, usage: (result as any).usageMetadata || {} };
 }
 
+// ======================================================================
+// Deep Research Agent (Gemini 3.1 Pro + googleSearch + urlContext)
+// ----------------------------------------------------------------------
+// Jina で手動fetchせず、モデル自身が「Google検索 → 最大20URLを訪問 →
+// 情報を統合 → JSON化」までワンショットで実行する。
+//
+// 参考: https://ai.google.dev/gemini-api/docs/url-context
+//       https://developers.googleblog.com/new-gemini-api-updates-for-gemini-3/
+// ======================================================================
+async function generateWithDeepResearch(
+  ai: GoogleGenAI,
+  companyName: string,
+  jobTitle: string,
+  salary: string,
+  seedUrls: string[],
+  focusHint?: string
+): Promise<{ jobData: any; usage: any; debug: any }> {
+  const seedsBlock = seedUrls.length
+    ? ["", "【参考URL（既に候補として特定済み。優先的に訪問してください）】", ...seedUrls.map((u) => `- ${u}`), ""].join("\n")
+    : "";
+
+  const prompt = [
+    "あなたは**採用ページのリサーチと求人票作成を自律的に行うエージェント**です。",
+    "Google検索 と URL Context の2つのツールを使って情報を収集し、最終的に求人票JSONを1つ返します。",
+    "",
+    "# 対象",
+    `- 会社名: ${companyName || "（未指定）"}`,
+    `- ポジション: ${jobTitle || "（全ポジションの中から主要なもの1つを選択）"}`,
+    `- ユーザー指定の給与: ${salary || "（未指定）"}`,
+    focusHint ? `- 重点: ${focusHint}` : "",
+    seedsBlock,
+    "# リサーチ戦略（必ずこの順に実行）",
+    "1. **会社特定**: 「(会社名) 採用」「(会社名) 公式」をGoogle検索し、会社公式ドメインと採用ページを特定する。類似社名には注意し、必ず正しい会社か確認する（事業内容・所在地で確認）",
+    "2. **ATS特定**: Talentio/HRMOS/Wantedly/HERP/Greenhouse/Lever/Workable/SmartRecruiters に掲載があるか `site:` 検索で確認し、見つけたら最優先で訪問",
+    "3. **個別求人詳細の取得**: 指定ポジションの**個別求人詳細ページ**をURL Contextで訪問し、給与・業務内容・必須/歓迎要件・勤務条件・選考フローを抽出（**これが求人票の本体**）",
+    "4. **企業情報の補完**: 会社公式サイトの /about /company /mission /values /careers を訪問し、事業内容・ミッション・ビジョン・カルチャー・社員数・設立年月を取得",
+    "5. **求人媒体の補強**: Indeed / doda / マイナビ転職 / リクナビ / エン転職 / Green / type / ビズリーチに同社掲載があれば、募集背景・求める人物像・月平均残業時間・有給取得率・選考フローを補う",
+    "6. **統合**: 複数ソースの情報を突き合わせ、矛盾があれば公式>ATS>求人媒体 の優先度で採用",
+    "",
+    "# 出力ルール（厳守）",
+    "- **応募者が読んで意思決定できる情報量**を目指す（talentio/open.talentio.com の求人詳細レベル = 50〜100項目）",
+    "- 各セクションは「トピック名: 値」のマップ形式。値は原文からの引用を基本とし、箇条書きは改行区切りで先頭「・」",
+    "- **推測・創作は絶対禁止**。調べた情報に無い項目は値を空文字（キーは出してよい）",
+    "- 番号サフィックス（『事業内容1』『事業内容2』等）禁止。同一トピックは1キーにまとめて改行区切り",
+    "- プラットフォーム定型文（「Wantedlyは〇〇万人…」「Powered by Talentio」等）は除外",
+    "- 代表者/所在地/設立年月などは会社HPから取得し、グループ会社のリストは極力含めない",
+    "- 必ず**指定ポジション固有の業務・要件・給与**を優先抽出（他職種の情報を混ぜない）",
+    "",
+    "# 出力スキーマ（JSONのみ、コードフェンス禁止）",
+    "{",
+    '  "summary": "...（2-3文で魅力を伝える要約）",',
+    '  "basicInfo": { "企業名":"", "募集職種":"", "雇用形態":"", "募集人数":"", "契約期間":"", "試用期間":"", "勤務開始日":"" },',
+    '  "companyInfo": { "事業内容":"", "ミッション":"", "ビジョン":"", "バリュー":"", "行動指針":"", "事業の特徴・強み":"", "今後の展望":"", "カルチャー":"", "社風":"", "成長性・業績":"", "表彰・受賞歴":"", "メディア掲載":"", "社員構成":"", "設立年月":"", "従業員数":"", "資本金":"", "代表者":"", "本社所在地":"", "代表メッセージ":"", "沿革":"" },',
+    '  "jobContent": { "主な業務内容":"", "ポジションの特徴":"", "このポジションの魅力":"", "募集背景":"", "得られるスキル・経験":"", "チーム構成":"", "配属先":"", "上司・一緒に働くメンバー":"", "1日の流れ":"", "今後の活躍の場・キャリアパス":"", "評価制度":"", "使用ツール・技術スタック":"", "社員の声・インタビュー":"" },',
+    '  "requirements": { "必須要件":"", "歓迎要件":"", "求める人材":"", "年齢":"", "学歴":"" },',
+    '  "salary": { "想定年収":"", "賃金形態":"", "基本給":"", "月給":"", "年俸月額":"", "所定内給与":"", "固定時間外手当":"", "固定深夜手当":"", "通勤手当":"", "残業手当":"", "諸手当":"", "給与改定":"", "昇給実績":"", "賞与":"", "賞与実績":"", "給与モデル例":"" },',
+    '  "workConditions": { "勤務地":"", "勤務地住所":"", "最寄り駅":"", "勤務時間":"", "所定労働時間":"", "フレックス":"", "コアタイム":"", "清算期間":"", "休憩時間":"", "リモートワーク":"", "残業":"", "月平均残業時間":"", "有給取得率":"", "試用期間":"", "転勤":"", "副業":"", "服装":"" },',
+    '  "selection": { "応募方法":"", "選考フロー":"", "面接回数":"", "カジュアル面談":"", "必要書類":"", "内定までの期間":"", "応募後の流れ":"", "連絡手段":"" },',
+    '  "holidays": { "休日制度":"", "年間休日数":"", "有給休暇":"", "特別休暇":"", "長期休暇":"", "育児休暇":"", "介護休暇":"" },',
+    '  "benefits": { "社会保険":"", "健康制度":"", "食事・ドリンク補助":"", "リモート・在宅支援":"", "通勤手当":"", "住宅手当":"", "家族手当":"", "育児・介護支援":"", "学習支援":"", "独自制度":"", "退職金":"", "表彰制度":"", "懇親会制度":"" }',
+    "}",
+  ].filter((s) => s !== "").join("\n");
+
+  // Gemini 3.1 Pro Preview を優先（最高品質・200万トークンコンテキスト・Deep Research対応）
+  // フォールバック: 3-flash-preview → 2.5-pro (ツール併用可能)
+  const DEEP_RESEARCH_MODELS = [
+    "gemini-3.1-pro-preview",
+    "gemini-3-flash-preview",
+    "gemini-2.5-pro",
+  ];
+
+  let lastErr: any;
+  for (let i = 0; i < DEEP_RESEARCH_MODELS.length; i++) {
+    const model = DEEP_RESEARCH_MODELS[i];
+    try {
+      console.log(`[deep-research] 試行: ${model}`);
+      const result = await withTimeout(
+        ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: {
+            tools: [{ googleSearch: {} }, { urlContext: {} }],
+            temperature: 0.1,
+            maxOutputTokens: 32000,
+            // Pro 系は thinkingBudget を強めに設定（自律エージェント挙動を有効化）
+            thinkingConfig: { thinkingBudget: model.includes("pro") ? 4096 : 1024 },
+          } as any,
+        }),
+        75000, // 自律リサーチは時間がかかる（検索 + 最大20URLの訪問）
+        `DeepResearch[${model}]`
+      );
+
+      const text = (result as any).text || "";
+      // URL context metadata（訪問したURLの成功/失敗）を取得
+      let visitedUrls: string[] = [];
+      try {
+        const cands: any[] = (result as any).candidates || [];
+        for (const c of cands) {
+          const meta = c?.urlContextMetadata?.urlMetadata || [];
+          for (const m of meta) {
+            if (m?.retrievedUrl) visitedUrls.push(m.retrievedUrl);
+          }
+        }
+      } catch {}
+
+      // JSON抽出
+      let data: any;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        const m = text.match(/\{[\s\S]*\}/);
+        if (!m) throw new Error("Deep Research 出力のJSONパース失敗");
+        data = JSON.parse(m[0]);
+      }
+
+      if (i > 0) console.log(`[deep-research] ${model} でフォールバック成功`);
+      const jobData = {
+        companyName: companyName || "",
+        jobTitle: jobTitle || "",
+        summary: typeof data.summary === "string" ? data.summary : flattenToString(data.summary),
+        basicInfo: normalizeDeepResearchSection(data.basicInfo),
+        companyInfo: normalizeDeepResearchSection(data.companyInfo),
+        jobContent: normalizeDeepResearchSection(data.jobContent),
+        requirements: normalizeDeepResearchSection(data.requirements),
+        salary: normalizeDeepResearchSection(data.salary),
+        workConditions: normalizeDeepResearchSection(data.workConditions),
+        selection: normalizeDeepResearchSection(data.selection),
+        holidays: normalizeDeepResearchSection(data.holidays),
+        benefits: normalizeDeepResearchSection(data.benefits),
+      };
+      return {
+        jobData,
+        usage: (result as any).usageMetadata || {},
+        debug: { model, visitedUrls, textSample: text.slice(0, 200) },
+      };
+    } catch (e: any) {
+      lastErr = e;
+      console.log(`[deep-research] ${model} 失敗: ${e.message}`);
+      if (!isRetryableGeminiError(e) && !/パース失敗/.test(e.message)) throw e;
+    }
+  }
+  throw lastErr || new Error("Deep Research 全モデル失敗");
+}
+
+// 任意の値(string/number/array/object)を文字列に平坦化。
+// Deep Research の結果を Record<string,string> に整形するため。
+function flattenToString(v: any, depth = 0): string {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (Array.isArray(v)) {
+    return v
+      .map((item) => flattenToString(item, depth + 1))
+      .filter((s) => s.trim())
+      .map((s) => (depth === 0 ? `・${s}` : s))
+      .join("\n");
+  }
+  if (typeof v === "object") {
+    return Object.entries(v)
+      .map(([k, val]) => {
+        const sub = flattenToString(val, depth + 1);
+        return sub ? `${k}: ${sub}` : "";
+      })
+      .filter((s) => s)
+      .join("\n");
+  }
+  return String(v);
+}
+
+// Deep Research 出力のサブセクションを Record<string,string> に正規化
+function normalizeDeepResearchSection(obj: any): Record<string, string> {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    out[k] = flattenToString(v);
+  }
+  return out;
+}
+
+// 「有効値を持つキー」のカウント（fallback判断用）
+function countValidFields(jobData: any): number {
+  const sections = ["basicInfo","companyInfo","jobContent","requirements","salary","workConditions","selection","holidays","benefits"];
+  let n = 0;
+  for (const s of sections) {
+    const obj = jobData?.[s] || {};
+    for (const k of Object.keys(obj)) {
+      if (typeof obj[k] === "string" && obj[k].trim().length > 0) n++;
+    }
+  }
+  return n;
+}
+
 async function generateJobJsonSplit(
   ai: GoogleGenAI,
   companyName: string,
@@ -1453,6 +1645,49 @@ export async function POST(req: NextRequest) {
 
   try {
     const ai = getGenAI();
+
+    // ============================================================
+    // Step 0: Deep Research Agent を最優先で試す
+    // Gemini 3.1 Pro + googleSearch + urlContext により、
+    // モデル自身が検索→URL訪問→情報統合→JSON化を一気通貫で実行。
+    // 成功して十分な情報量があれば即返却。失敗/情報不足なら従来パスに落とす。
+    // ============================================================
+    const DEEP_RESEARCH_MIN_FIELDS = 30; // この数以上のフィールドが埋まれば deep research のみで確定
+    try {
+      const seedUrls = companyUrl && /^https?:\/\//.test(companyUrl) ? [companyUrl] : [];
+      console.log(`[deep-research] 起動: companyName="${companyName}" jobTitle="${jobTitle}" seeds=${seedUrls.length}`);
+      const dr = await generateWithDeepResearch(
+        ai,
+        companyName,
+        jobTitle,
+        salary,
+        seedUrls,
+        jobTitle || undefined
+      );
+      const validCount = countValidFields(dr.jobData);
+      console.log(`[deep-research] 完了: 有効フィールド=${validCount}`);
+      if (validCount >= DEEP_RESEARCH_MIN_FIELDS) {
+        const inTok = dr.usage.promptTokenCount || 0;
+        const outTok = dr.usage.candidatesTokenCount || 0;
+        const meta = {
+          engine: `deep-research (${dr.debug.model})`,
+          elapsed_ms: Date.now() - startedAt,
+          visited_urls: dr.debug.visitedUrls,
+          valid_fields: validCount,
+          tokens: { input: inTok, output: outTok },
+          // 3.1-pro-preview: input $2/1M, output $12/1M (概算)
+          cost: {
+            input_usd: +((inTok / 1_000_000) * 2).toFixed(6),
+            output_usd: +((outTok / 1_000_000) * 12).toFixed(6),
+          },
+        };
+        (dr.jobData as any)._meta = meta;
+        return NextResponse.json(dr.jobData);
+      }
+      console.log(`[deep-research] フィールド不足(${validCount}<${DEEP_RESEARCH_MIN_FIELDS})→従来パスにフォールバック`);
+    } catch (e: any) {
+      console.log(`[deep-research] 失敗→従来パスにフォールバック: ${e.message}`);
+    }
 
     // Step 1: 対象URLを確定
     let targetUrls: string[] = [];
