@@ -2,7 +2,10 @@
 
 import React, { useState, useRef, useEffect } from "react";
 
-const STORAGE_KEY = "job-listing-app:state:v2";
+const STORAGE_KEY = "job-listing-app:state:v3";
+const LEGACY_STORAGE_KEY = "job-listing-app:state:v2";
+const DRAFTS_STORAGE_KEY = "job-listing-app:drafts:v1";
+const MAX_DRAFTS = 20;
 
 type JobPosition = {
   jobTitle: string;
@@ -30,6 +33,40 @@ type JobData = {
   positions?: JobPosition[];
   sources?: string[];
 };
+
+type DraftInput = {
+  companyName: string;
+  companyUrl: string;
+  jobTitle: string;
+  salary: string;
+  meetingTranscript: string;
+  meetingNotes: string;
+};
+
+type JobDraft = {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  input: DraftInput;
+  result: JobData;
+};
+
+function createDraftId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  return `draft-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function formatDraftDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "日時不明";
+  return new Intl.DateTimeFormat("ja-JP", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
 
 // セクション定義（selection=選考プロセスを勤務条件の後に追加）
 const SECTION_DEFS: { key: keyof JobData; title: string }[] = [
@@ -69,6 +106,8 @@ export default function Home() {
   const [companyUrl, setCompanyUrl] = useState("");
   const [jobTitle, setJobTitle] = useState("");
   const [salary, setSalary] = useState("");
+  const [meetingTranscript, setMeetingTranscript] = useState("");
+  const [meetingNotes, setMeetingNotes] = useState("");
 
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<JobData | null>(null);
@@ -78,18 +117,39 @@ export default function Home() {
   const [hydrated, setHydrated] = useState(false);
   const [activePositionIndex, setActivePositionIndex] = useState(0);
   const [positionLoadingIdx, setPositionLoadingIdx] = useState<number | null>(null);
+  const [drafts, setDrafts] = useState<JobDraft[]>([]);
+  const [currentDraftId, setCurrentDraftId] = useState<string | null>(null);
+
+  const getCurrentInput = (): DraftInput => ({
+    companyName,
+    companyUrl,
+    jobTitle,
+    salary,
+    meetingTranscript,
+    meetingNotes,
+  });
 
   // 状態の復元
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
+      const draftsRaw = localStorage.getItem(DRAFTS_STORAGE_KEY);
+      if (draftsRaw) {
+        const parsedDrafts = JSON.parse(draftsRaw);
+        if (Array.isArray(parsedDrafts)) setDrafts(parsedDrafts.slice(0, MAX_DRAFTS));
+      }
+      const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
       if (raw) {
         const s = JSON.parse(raw);
         if (s.companyName) setCompanyName(s.companyName);
         if (s.companyUrl) setCompanyUrl(s.companyUrl);
         if (s.jobTitle) setJobTitle(s.jobTitle);
         if (s.salary) setSalary(s.salary);
-        if (s.result) setResult(s.result);
+        if (s.meetingTranscript) setMeetingTranscript(s.meetingTranscript);
+        if (s.meetingNotes) setMeetingNotes(s.meetingNotes);
+        if (s.result) {
+          setResult(s.result);
+          setCurrentDraftId(s.currentDraftId || createDraftId());
+        }
       }
     } catch {}
     setHydrated(true);
@@ -101,10 +161,90 @@ export default function Home() {
     try {
       localStorage.setItem(
         STORAGE_KEY,
-        JSON.stringify({ companyName, companyUrl, jobTitle, salary, result })
+        JSON.stringify({
+          companyName,
+          companyUrl,
+          jobTitle,
+          salary,
+          meetingTranscript,
+          meetingNotes,
+          result,
+          currentDraftId,
+        })
       );
     } catch {}
-  }, [hydrated, companyName, companyUrl, jobTitle, salary, result]);
+  }, [hydrated, companyName, companyUrl, jobTitle, salary, meetingTranscript, meetingNotes, result, currentDraftId]);
+
+  // 生成済み求人票は履歴へ自動保存。直接編集で result が変わるたび同じ下書きを更新する。
+  useEffect(() => {
+    if (!hydrated || !result || !currentDraftId) return;
+    setDrafts((previous) => {
+      const now = new Date().toISOString();
+      const existing = previous.find((draft) => draft.id === currentDraftId);
+      const nextDraft: JobDraft = {
+        id: currentDraftId,
+        createdAt: existing?.createdAt || now,
+        updatedAt: now,
+        input: getCurrentInput(),
+        result,
+      };
+      const next = [nextDraft, ...previous.filter((draft) => draft.id !== currentDraftId)].slice(0, MAX_DRAFTS);
+      try {
+        localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    // result の変更を保存トリガーにする。入力だけの変更で過去の求人票を上書きしない。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, result, currentDraftId]);
+
+  const loadDraft = (draft: JobDraft) => {
+    setCompanyName(draft.input.companyName || "");
+    setCompanyUrl(draft.input.companyUrl || "");
+    setJobTitle(draft.input.jobTitle || "");
+    setSalary(draft.input.salary || "");
+    setMeetingTranscript(draft.input.meetingTranscript || "");
+    setMeetingNotes(draft.input.meetingNotes || "");
+    setResult(draft.result);
+    setCurrentDraftId(draft.id);
+    setActivePositionIndex(0);
+    setError("");
+  };
+
+  const deleteDraft = (draftId: string) => {
+    if (!confirm("この求人票の履歴を削除しますか？")) return;
+    setDrafts((previous) => {
+      const next = previous.filter((draft) => draft.id !== draftId);
+      try {
+        localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    if (currentDraftId === draftId) {
+      setCurrentDraftId(null);
+      setResult(null);
+    }
+  };
+
+  const duplicateDraft = (draft: JobDraft) => {
+    const now = new Date().toISOString();
+    const copy: JobDraft = {
+      ...draft,
+      id: createDraftId(),
+      createdAt: now,
+      updatedAt: now,
+      input: { ...draft.input },
+      result: JSON.parse(JSON.stringify(draft.result)),
+    };
+    setDrafts((previous) => {
+      const next = [copy, ...previous].slice(0, MAX_DRAFTS);
+      try {
+        localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    loadDraft(copy);
+  };
 
   // ポジション切替用: 表示するデータを合成
   const displayResult: JobData | null = React.useMemo(() => {
@@ -179,12 +319,15 @@ export default function Home() {
   };
 
   const handleClearAll = () => {
-    if (!confirm("入力と編集中の求人票をすべてリセットしますか？")) return;
+    if (!confirm("入力と編集中の求人票をリセットしますか？ 保存済みの履歴は残ります。")) return;
     setCompanyName("");
     setCompanyUrl("");
     setJobTitle("");
     setSalary("");
+    setMeetingTranscript("");
+    setMeetingNotes("");
     setResult(null);
+    setCurrentDraftId(null);
     setError("");
     try {
       localStorage.removeItem(STORAGE_KEY);
@@ -201,7 +344,6 @@ export default function Home() {
 
     setLoading(true);
     setError("");
-    setResult(null);
 
     try {
       const res = await fetch("/api/generate", {
@@ -212,6 +354,8 @@ export default function Home() {
           companyUrl: companyUrl.trim(),
           jobTitle: jobTitle.trim(),
           salary: salary.trim(),
+          meetingTranscript: meetingTranscript.trim(),
+          meetingNotes: meetingNotes.trim(),
         }),
       });
 
@@ -232,7 +376,7 @@ export default function Home() {
       if (!res.ok) throw new Error(data?.error || `エラーが発生しました (${res.status})`);
 
       // 9セクション構造(selection=選考プロセス追加)に対応
-      setResult({
+      const generatedResult: JobData = {
         companyName: data.companyName || "",
         jobTitle: data.jobTitle || "",
         summary: data.summary || "",
@@ -247,7 +391,9 @@ export default function Home() {
         benefits: data.benefits || {},
         positions: Array.isArray(data.positions) ? data.positions : undefined,
         sources: data.sources || [],
-      });
+      };
+      setCurrentDraftId(createDraftId());
+      setResult(generatedResult);
       setActivePositionIndex(0);
 
     } catch (err: any) {
@@ -500,13 +646,63 @@ export default function Home() {
 
   return (
     <main className="max-w-4xl mx-auto px-4 py-12">
-      <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成アプリ v2.2.1</h1>
+      <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成アプリ v2.3.0</h1>
       <p className="text-center text-gray-600 mb-2">
         企業の公式採用ページ（Talentio / HRMOS / Wantedly / 自社採用HP）を優先取得し、HP・求人媒体（Indeed / doda / マイナビ転職 / リクナビNEXT / エン転職 等）も追加情報として参照して求人票を生成します。
       </p>
       <p className="text-center text-sm text-gray-500 mb-8">
-        採用ページを正本として原文転記 → 不足情報をHP/媒体から補完
+        打ち合わせ情報を最優先 → 採用ページ・公開インタビュー・求人媒体で補完
       </p>
+
+      <section className="bg-white rounded-xl border shadow-sm p-5 mb-6" aria-labelledby="draft-history-title">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+          <div>
+            <h2 id="draft-history-title" className="font-bold text-gray-800">🕘 編集できる求人票履歴</h2>
+            <p className="text-xs text-gray-500 mt-1">生成後の直接編集は自動保存され、ここから続きが編集できます（このブラウザに最大{MAX_DRAFTS}件）。</p>
+          </div>
+          <button
+            type="button"
+            onClick={handleClearAll}
+            className="shrink-0 bg-blue-50 text-blue-700 border border-blue-200 px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-100"
+          >
+            ＋ 新しい求人票を作る
+          </button>
+        </div>
+        {drafts.length === 0 ? (
+          <p className="text-sm text-gray-400 py-3 text-center border-2 border-dashed border-gray-200 rounded-lg">
+            生成済みの求人票はまだありません
+          </p>
+        ) : (
+          <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+            {drafts.map((draft) => (
+              <div
+                key={draft.id}
+                className={`flex flex-col sm:flex-row sm:items-center gap-3 rounded-lg border p-3 ${
+                  currentDraftId === draft.id ? "border-blue-400 bg-blue-50" : "border-gray-200 bg-gray-50"
+                }`}
+              >
+                <button type="button" onClick={() => loadDraft(draft)} className="min-w-0 flex-1 text-left">
+                  <span className="block text-sm font-bold text-gray-800 truncate">
+                    {draft.result.companyName || "会社名未設定"}{draft.result.jobTitle ? `｜${draft.result.jobTitle}` : ""}
+                  </span>
+                  <span className="block text-xs text-gray-500 mt-1">更新 {formatDraftDate(draft.updatedAt)}</span>
+                </button>
+                <div className="flex gap-2 shrink-0">
+                  <button type="button" onClick={() => loadDraft(draft)} className="px-3 py-1.5 rounded border border-blue-200 bg-white text-blue-700 text-xs font-medium hover:bg-blue-50">
+                    開く
+                  </button>
+                  <button type="button" onClick={() => duplicateDraft(draft)} className="px-3 py-1.5 rounded border border-gray-300 bg-white text-gray-700 text-xs font-medium hover:bg-gray-100">
+                    複製
+                  </button>
+                  <button type="button" onClick={() => deleteDraft(draft.id)} className="px-3 py-1.5 rounded border border-red-200 bg-white text-red-600 text-xs font-medium hover:bg-red-50">
+                    削除
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       <form onSubmit={handleSubmit} className="bg-white rounded-xl border shadow-sm p-6 mb-8 space-y-4">
         <div>
@@ -566,6 +762,37 @@ export default function Home() {
           </div>
         </div>
 
+        <div>
+          <div className="flex items-end justify-between gap-3 mb-1">
+            <label className="block text-sm font-medium text-gray-700">MTGの文字起こし（任意）</label>
+            <span className="text-xs text-gray-400">{meetingTranscript.length.toLocaleString()} / 30,000文字</span>
+          </div>
+          <textarea
+            value={meetingTranscript}
+            onChange={(e) => setMeetingTranscript(e.target.value)}
+            maxLength={30000}
+            rows={8}
+            placeholder="打ち合わせの文字起こしを貼り付けてください。求人票作成の一次情報として最優先で反映します。"
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
+
+        <div>
+          <div className="flex items-end justify-between gap-3 mb-1">
+            <label className="block text-sm font-medium text-gray-700">自由記述の打ち合わせメモ（任意）</label>
+            <span className="text-xs text-gray-400">{meetingNotes.length.toLocaleString()} / 10,000文字</span>
+          </div>
+          <textarea
+            value={meetingNotes}
+            onChange={(e) => setMeetingNotes(e.target.value)}
+            maxLength={10000}
+            rows={5}
+            placeholder="採用背景、求める人物像、職場の雰囲気、社員の声、特に訴求したい点などを自由に入力してください。"
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <p className="text-xs text-amber-700 mt-1">個人情報や機密情報は必要な範囲だけ入力してください。入力内容はこのブラウザの履歴にも保存されます。</p>
+        </div>
+
         <button
           type="submit"
           disabled={loading}
@@ -580,7 +807,7 @@ export default function Home() {
           <div className="inline-block animate-spin rounded-full h-8 w-8 border-4 border-blue-600 border-t-transparent mb-4"></div>
           <div className="space-y-2">
             <p className="text-gray-700 font-medium">企業の公式採用ページを検索・分析しています...</p>
-            <p className="text-sm text-gray-500">Talentio / HRMOS / Wantedly / 自社採用HP を最大6件並列で取得</p>
+            <p className="text-sm text-gray-500">打ち合わせ情報・公式採用ページ・社員インタビュー・公開求人情報を統合</p>
             <p className="text-xs text-gray-400">通常15-40秒で完了します</p>
           </div>
         </div>
