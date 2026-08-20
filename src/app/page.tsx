@@ -1,6 +1,13 @@
 "use client";
 
 import React, { useState, useRef, useEffect } from "react";
+import {
+  MAX_REFERENCE_FILES,
+  MAX_REFERENCE_TEXT_LENGTH,
+  isSupportedReferenceFile,
+  parseReferenceFile,
+  type ReferenceDocument,
+} from "@/lib/reference-file-parser";
 
 const STORAGE_KEY = "job-listing-app:state:v3";
 const LEGACY_STORAGE_KEY = "job-listing-app:state:v2";
@@ -41,6 +48,7 @@ type DraftInput = {
   salary: string;
   meetingTranscript: string;
   meetingNotes: string;
+  referenceDocuments: ReferenceDocument[];
 };
 
 type JobDraft = {
@@ -66,6 +74,11 @@ function formatDraftDate(value: string): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
+}
+
+function formatFileSize(size: number): string {
+  if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024)).toLocaleString()}KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)}MB`;
 }
 
 function normalizeSearchText(value: string): string {
@@ -133,6 +146,9 @@ export default function Home() {
   const [salary, setSalary] = useState("");
   const [meetingTranscript, setMeetingTranscript] = useState("");
   const [meetingNotes, setMeetingNotes] = useState("");
+  const [referenceDocuments, setReferenceDocuments] = useState<ReferenceDocument[]>([]);
+  const [referenceFilesProcessing, setReferenceFilesProcessing] = useState(false);
+  const [referenceFileError, setReferenceFileError] = useState("");
 
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<JobData | null>(null);
@@ -154,6 +170,7 @@ export default function Home() {
     salary,
     meetingTranscript,
     meetingNotes,
+    referenceDocuments,
   });
 
   // 状態の復元
@@ -173,6 +190,7 @@ export default function Home() {
         if (s.salary) setSalary(s.salary);
         if (s.meetingTranscript) setMeetingTranscript(s.meetingTranscript);
         if (s.meetingNotes) setMeetingNotes(s.meetingNotes);
+        if (Array.isArray(s.referenceDocuments)) setReferenceDocuments(s.referenceDocuments.slice(0, MAX_REFERENCE_FILES));
         if (s.result) {
           setResult(s.result);
           setCurrentDraftId(s.currentDraftId || createDraftId());
@@ -195,12 +213,13 @@ export default function Home() {
           salary,
           meetingTranscript,
           meetingNotes,
+          referenceDocuments,
           result,
           currentDraftId,
         })
       );
     } catch {}
-  }, [hydrated, companyName, companyUrl, jobTitle, salary, meetingTranscript, meetingNotes, result, currentDraftId]);
+  }, [hydrated, companyName, companyUrl, jobTitle, salary, meetingTranscript, meetingNotes, referenceDocuments, result, currentDraftId]);
 
   // 生成済み求人票は履歴へ自動保存。直接編集で result が変わるたび同じ下書きを更新する。
   useEffect(() => {
@@ -229,6 +248,8 @@ export default function Home() {
     setSalary(draft.input.salary || "");
     setMeetingTranscript(draft.input.meetingTranscript || "");
     setMeetingNotes(draft.input.meetingNotes || "");
+    setReferenceDocuments(Array.isArray(draft.input.referenceDocuments) ? draft.input.referenceDocuments : []);
+    setReferenceFileError("");
     setResult(draft.result);
     setCurrentDraftId(draft.id);
     setActivePositionIndex(0);
@@ -254,7 +275,10 @@ export default function Home() {
       id: createDraftId(),
       createdAt: now,
       updatedAt: now,
-      input: { ...draft.input },
+      input: {
+        ...draft.input,
+        referenceDocuments: (draft.input.referenceDocuments || []).map((document) => ({ ...document })),
+      },
       result: JSON.parse(JSON.stringify(draft.result)),
     };
     setDrafts((previous) => {
@@ -285,6 +309,75 @@ export default function Home() {
       return (!companyQuery || companyText.includes(companyQuery)) && (!jobQuery || jobText.includes(jobQuery));
     });
   }, [drafts, historyCompanyQuery, historyJobQuery]);
+
+  const referenceTextLength = referenceDocuments.reduce((sum, document) => sum + document.text.length, 0);
+
+  const handleReferenceFiles = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const selectedFiles = Array.from(input.files || []);
+    input.value = "";
+    if (selectedFiles.length === 0) return;
+
+    const availableSlots = MAX_REFERENCE_FILES - referenceDocuments.length;
+    if (availableSlots <= 0) {
+      setReferenceFileError(`資料は最大${MAX_REFERENCE_FILES}ファイルまで追加できます。`);
+      return;
+    }
+
+    const files = selectedFiles.slice(0, availableSlots);
+    const errors: string[] = [];
+    if (selectedFiles.length > availableSlots) {
+      errors.push(`最大${MAX_REFERENCE_FILES}ファイルのため、先頭${availableSlots}ファイルだけ追加しました。`);
+    }
+
+    setReferenceFilesProcessing(true);
+    setReferenceFileError("");
+    const parsedDocuments: ReferenceDocument[] = [];
+    let remainingCharacters = MAX_REFERENCE_TEXT_LENGTH - referenceTextLength;
+
+    for (const file of files) {
+      if (!isSupportedReferenceFile(file)) {
+        errors.push(`${file.name}: PDFまたはExcel（.xlsx / .xls）を選択してください。`);
+        continue;
+      }
+      if (
+        [...referenceDocuments, ...parsedDocuments].some(
+          (document) => document.name === file.name && document.size === file.size
+        )
+      ) {
+        errors.push(`${file.name}: 同じファイルが既に追加されています。`);
+        continue;
+      }
+      if (remainingCharacters <= 0) {
+        errors.push(`抽出テキストは合計${MAX_REFERENCE_TEXT_LENGTH.toLocaleString()}文字までです。`);
+        break;
+      }
+
+      try {
+        const parsed = await parseReferenceFile(file);
+        const text = parsed.text.slice(0, remainingCharacters);
+        parsedDocuments.push({
+          ...parsed,
+          text,
+          truncated: parsed.truncated || text.length < parsed.text.length,
+        });
+        remainingCharacters -= text.length;
+      } catch (fileError) {
+        errors.push(fileError instanceof Error ? fileError.message : `${file.name}: 読み込みに失敗しました。`);
+      }
+    }
+
+    if (parsedDocuments.length > 0) {
+      setReferenceDocuments((previous) => [...previous, ...parsedDocuments].slice(0, MAX_REFERENCE_FILES));
+    }
+    setReferenceFileError(errors.join("\n"));
+    setReferenceFilesProcessing(false);
+  };
+
+  const removeReferenceDocument = (index: number) => {
+    setReferenceDocuments((previous) => previous.filter((_, documentIndex) => documentIndex !== index));
+    setReferenceFileError("");
+  };
 
   // ポジション切替用: 表示するデータを合成
   const displayResult: JobData | null = React.useMemo(() => {
@@ -321,6 +414,7 @@ export default function Home() {
           positionTitle: p.jobTitle,
           companyName: result.companyName,
           sources: result.sources || [],
+          referenceDocuments: referenceDocuments.map(({ name, text }) => ({ name, text })),
         }),
       });
 
@@ -366,6 +460,8 @@ export default function Home() {
     setSalary("");
     setMeetingTranscript("");
     setMeetingNotes("");
+    setReferenceDocuments([]);
+    setReferenceFileError("");
     setResult(null);
     setCurrentDraftId(null);
     setError("");
@@ -396,6 +492,7 @@ export default function Home() {
           salary: salary.trim(),
           meetingTranscript: meetingTranscript.trim(),
           meetingNotes: meetingNotes.trim(),
+          referenceDocuments: referenceDocuments.map(({ name, text }) => ({ name, text })),
         }),
       });
 
@@ -686,12 +783,12 @@ export default function Home() {
 
   return (
     <main className="max-w-4xl mx-auto px-4 py-12">
-      <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成アプリ v2.4.0</h1>
+      <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成アプリ v2.5.0</h1>
       <p className="text-center text-gray-600 mb-2">
         企業の公式採用ページ（Talentio / HRMOS / Wantedly / 自社採用HP）を優先取得し、HP・求人媒体（Indeed / doda / マイナビ転職 / リクナビNEXT / エン転職 等）も追加情報として参照して求人票を生成します。
       </p>
       <p className="text-center text-sm text-gray-500 mb-8">
-        打ち合わせ情報を最優先 → 採用ページ・公開インタビュー・求人媒体で補完
+        打ち合わせ情報・提供資料を最優先 → 採用ページ・公開インタビュー・求人媒体で補完
       </p>
 
       <section className="bg-white rounded-xl border shadow-sm p-5 mb-6" aria-labelledby="draft-history-title">
@@ -886,9 +983,76 @@ export default function Home() {
           <p className="text-xs text-amber-700 mt-1">個人情報や機密情報は必要な範囲だけ入力してください。入力内容はこのブラウザの履歴にも保存されます。</p>
         </div>
 
+        <div className="rounded-xl border border-blue-200 bg-blue-50/50 p-4">
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 mb-3">
+            <div>
+              <label htmlFor="reference-files" className="block text-sm font-medium text-gray-800">
+                お客様からいただいた資料（任意）
+              </label>
+              <p id="reference-files-help" className="text-xs text-gray-600 mt-1">
+                PDF・Excel（.xlsx / .xls）を最大{MAX_REFERENCE_FILES}ファイル、各10MBまで。内容をブラウザ内で抽出します。
+              </p>
+            </div>
+            <span className="text-xs text-gray-500 shrink-0">
+              {referenceDocuments.length} / {MAX_REFERENCE_FILES}ファイル・{referenceTextLength.toLocaleString()} / {MAX_REFERENCE_TEXT_LENGTH.toLocaleString()}文字
+            </span>
+          </div>
+
+          <input
+            id="reference-files"
+            type="file"
+            accept=".pdf,.xlsx,.xls,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+            multiple
+            onChange={handleReferenceFiles}
+            disabled={referenceFilesProcessing || referenceDocuments.length >= MAX_REFERENCE_FILES}
+            aria-describedby="reference-files-help"
+            className="block w-full text-sm text-gray-700 file:mr-3 file:rounded-lg file:border-0 file:bg-blue-600 file:px-4 file:py-2 file:font-medium file:text-white hover:file:bg-blue-700 disabled:opacity-50"
+          />
+
+          {referenceFilesProcessing ? (
+            <p className="mt-3 text-sm font-medium text-blue-700" role="status">
+              資料から文字を抽出しています...
+            </p>
+          ) : null}
+
+          {referenceDocuments.length > 0 ? (
+            <ul className="mt-3 space-y-2">
+              {referenceDocuments.map((document, index) => (
+                <li key={`${document.name}-${document.size}-${index}`} className="flex items-center gap-3 rounded-lg border border-blue-100 bg-white p-3">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-100 text-xs font-bold text-blue-700">
+                    {document.kind}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium text-gray-800">{document.name}</p>
+                    <p className="mt-0.5 text-xs text-gray-500">
+                      {formatFileSize(document.size)}・{document.text.length.toLocaleString()}文字抽出
+                      {document.truncated ? "・上限に合わせて一部省略" : ""}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removeReferenceDocument(index)}
+                    className="shrink-0 rounded border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50"
+                    aria-label={`${document.name}を削除`}
+                  >
+                    削除
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+
+          {referenceFileError ? (
+            <p className="mt-3 whitespace-pre-wrap text-sm text-red-600" role="alert">{referenceFileError}</p>
+          ) : null}
+          <p className="mt-3 text-xs text-amber-700">
+            画像だけのPDFは文字を抽出できません。OCR済みPDFをご利用ください。抽出内容は求人票作成とブラウザ履歴に使用されます。
+          </p>
+        </div>
+
         <button
           type="submit"
-          disabled={loading}
+          disabled={loading || referenceFilesProcessing}
           className="w-full bg-blue-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50"
         >
           {loading ? "🔍 企業採用ページを分析中..." : "🚀 詳細求人票を生成"}
@@ -900,7 +1064,7 @@ export default function Home() {
           <div className="inline-block animate-spin rounded-full h-8 w-8 border-4 border-blue-600 border-t-transparent mb-4"></div>
           <div className="space-y-2">
             <p className="text-gray-700 font-medium">企業の公式採用ページを検索・分析しています...</p>
-            <p className="text-sm text-gray-500">打ち合わせ情報・公式採用ページ・社員インタビュー・公開求人情報を統合</p>
+            <p className="text-sm text-gray-500">打ち合わせ情報・提供資料・公式採用ページ・社員インタビュー・公開求人情報を統合</p>
             <p className="text-xs text-gray-400">通常15-40秒で完了します</p>
           </div>
         </div>
