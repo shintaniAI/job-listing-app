@@ -5,7 +5,7 @@ import React, { useState, useRef, useEffect } from "react";
 const STORAGE_KEY = "job-listing-app:state:v3";
 const LEGACY_STORAGE_KEY = "job-listing-app:state:v2";
 const DRAFTS_STORAGE_KEY = "job-listing-app:drafts:v1";
-const MAX_DRAFTS = 20;
+const MAX_DRAFTS = 100;
 
 type JobPosition = {
   jobTitle: string;
@@ -68,6 +68,31 @@ function formatDraftDate(value: string): string {
   }).format(date);
 }
 
+function normalizeSearchText(value: string): string {
+  return value.normalize("NFKC").toLocaleLowerCase("ja-JP").replace(/\s+/g, " ").trim();
+}
+
+// localStorage の容量に収まらない場合は、新しい履歴を優先して古いものから整理する。
+function persistDrafts(drafts: JobDraft[]): JobDraft[] {
+  let candidates = drafts.slice(0, MAX_DRAFTS);
+  while (candidates.length > 0) {
+    try {
+      localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(candidates));
+      return candidates;
+    } catch (error) {
+      const isQuotaError =
+        error instanceof DOMException &&
+        (error.name === "QuotaExceededError" || error.name === "NS_ERROR_DOM_QUOTA_REACHED");
+      if (!isQuotaError) return candidates;
+      candidates = candidates.slice(0, -1);
+    }
+  }
+  try {
+    localStorage.setItem(DRAFTS_STORAGE_KEY, "[]");
+  } catch {}
+  return [];
+}
+
 // セクション定義（selection=選考プロセスを勤務条件の後に追加）
 const SECTION_DEFS: { key: keyof JobData; title: string }[] = [
   { key: "basicInfo", title: "1. 基本情報" },
@@ -119,6 +144,8 @@ export default function Home() {
   const [positionLoadingIdx, setPositionLoadingIdx] = useState<number | null>(null);
   const [drafts, setDrafts] = useState<JobDraft[]>([]);
   const [currentDraftId, setCurrentDraftId] = useState<string | null>(null);
+  const [historyCompanyQuery, setHistoryCompanyQuery] = useState("");
+  const [historyJobQuery, setHistoryJobQuery] = useState("");
 
   const getCurrentInput = (): DraftInput => ({
     companyName,
@@ -188,11 +215,8 @@ export default function Home() {
         input: getCurrentInput(),
         result,
       };
-      const next = [nextDraft, ...previous.filter((draft) => draft.id !== currentDraftId)].slice(0, MAX_DRAFTS);
-      try {
-        localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(next));
-      } catch {}
-      return next;
+      const next = [nextDraft, ...previous.filter((draft) => draft.id !== currentDraftId)];
+      return persistDrafts(next);
     });
     // result の変更を保存トリガーにする。入力だけの変更で過去の求人票を上書きしない。
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -215,10 +239,7 @@ export default function Home() {
     if (!confirm("この求人票の履歴を削除しますか？")) return;
     setDrafts((previous) => {
       const next = previous.filter((draft) => draft.id !== draftId);
-      try {
-        localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(next));
-      } catch {}
-      return next;
+      return persistDrafts(next);
     });
     if (currentDraftId === draftId) {
       setCurrentDraftId(null);
@@ -237,14 +258,33 @@ export default function Home() {
       result: JSON.parse(JSON.stringify(draft.result)),
     };
     setDrafts((previous) => {
-      const next = [copy, ...previous].slice(0, MAX_DRAFTS);
-      try {
-        localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(next));
-      } catch {}
-      return next;
+      return persistDrafts([copy, ...previous]);
     });
     loadDraft(copy);
   };
+
+  const filteredDrafts = React.useMemo(() => {
+    const companyQuery = normalizeSearchText(historyCompanyQuery);
+    const jobQuery = normalizeSearchText(historyJobQuery);
+
+    if (!companyQuery && !jobQuery) return drafts;
+
+    return drafts.filter((draft) => {
+      const companyText = normalizeSearchText(
+        [draft.input.companyName, draft.result.companyName].filter(Boolean).join(" ")
+      );
+      const jobText = normalizeSearchText(
+        [
+          draft.input.jobTitle,
+          draft.result.jobTitle,
+          ...(draft.result.positions || []).map((position) => position.jobTitle),
+        ]
+          .filter(Boolean)
+          .join(" ")
+      );
+      return (!companyQuery || companyText.includes(companyQuery)) && (!jobQuery || jobText.includes(jobQuery));
+    });
+  }, [drafts, historyCompanyQuery, historyJobQuery]);
 
   // ポジション切替用: 表示するデータを合成
   const displayResult: JobData | null = React.useMemo(() => {
@@ -646,7 +686,7 @@ export default function Home() {
 
   return (
     <main className="max-w-4xl mx-auto px-4 py-12">
-      <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成アプリ v2.3.0</h1>
+      <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成アプリ v2.4.0</h1>
       <p className="text-center text-gray-600 mb-2">
         企業の公式採用ページ（Talentio / HRMOS / Wantedly / 自社採用HP）を優先取得し、HP・求人媒体（Indeed / doda / マイナビ転職 / リクナビNEXT / エン転職 等）も追加情報として参照して求人票を生成します。
       </p>
@@ -658,7 +698,7 @@ export default function Home() {
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
           <div>
             <h2 id="draft-history-title" className="font-bold text-gray-800">🕘 編集できる求人票履歴</h2>
-            <p className="text-xs text-gray-500 mt-1">生成後の直接編集は自動保存され、ここから続きが編集できます（このブラウザに最大{MAX_DRAFTS}件）。</p>
+            <p className="text-xs text-gray-500 mt-1">生成後の直接編集は自動保存され、ここから続きが編集できます（このブラウザに最大{MAX_DRAFTS}件・容量超過時は古い順に整理）。</p>
           </div>
           <button
             type="button"
@@ -668,13 +708,66 @@ export default function Home() {
             ＋ 新しい求人票を作る
           </button>
         </div>
+        {drafts.length > 0 ? (
+          <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label htmlFor="history-company-search" className="block text-xs font-medium text-gray-600 mb-1">
+                  会社名で検索
+                </label>
+                <input
+                  id="history-company-search"
+                  type="search"
+                  value={historyCompanyQuery}
+                  onChange={(event) => setHistoryCompanyQuery(event.target.value)}
+                  placeholder="例: 株式会社オリゾ"
+                  className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label htmlFor="history-job-search" className="block text-xs font-medium text-gray-600 mb-1">
+                  職種で検索
+                </label>
+                <input
+                  id="history-job-search"
+                  type="search"
+                  value={historyJobQuery}
+                  onChange={(event) => setHistoryJobQuery(event.target.value)}
+                  placeholder="例: ソリューション営業"
+                  className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+            <div className="flex items-center justify-between gap-3 mt-2">
+              <p className="text-xs text-gray-500">
+                {filteredDrafts.length.toLocaleString()}件 / 全{drafts.length.toLocaleString()}件
+              </p>
+              {historyCompanyQuery || historyJobQuery ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHistoryCompanyQuery("");
+                    setHistoryJobQuery("");
+                  }}
+                  className="text-xs font-medium text-blue-700 hover:underline"
+                >
+                  検索条件をクリア
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
         {drafts.length === 0 ? (
           <p className="text-sm text-gray-400 py-3 text-center border-2 border-dashed border-gray-200 rounded-lg">
             生成済みの求人票はまだありません
           </p>
+        ) : filteredDrafts.length === 0 ? (
+          <p className="text-sm text-gray-500 py-5 text-center border-2 border-dashed border-gray-200 rounded-lg">
+            検索条件に一致する求人票はありません
+          </p>
         ) : (
           <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-            {drafts.map((draft) => (
+            {filteredDrafts.map((draft) => (
               <div
                 key={draft.id}
                 className={`flex flex-col sm:flex-row sm:items-center gap-3 rounded-lg border p-3 ${
