@@ -4,6 +4,7 @@ import React, { useState, useRef, useEffect } from "react";
 import {
   MAX_REFERENCE_FILES,
   MAX_REFERENCE_FILE_SIZE_MB,
+  MAX_REFERENCE_OCR_PAGES,
   MAX_REFERENCE_TEXT_LENGTH,
   isSupportedReferenceFile,
   parseReferenceFile,
@@ -149,6 +150,7 @@ export default function Home() {
   const [meetingNotes, setMeetingNotes] = useState("");
   const [referenceDocuments, setReferenceDocuments] = useState<ReferenceDocument[]>([]);
   const [referenceFilesProcessing, setReferenceFilesProcessing] = useState(false);
+  const [referenceFileProgress, setReferenceFileProgress] = useState("");
   const [referenceFileError, setReferenceFileError] = useState("");
 
   const [loading, setLoading] = useState(false);
@@ -332,6 +334,7 @@ export default function Home() {
     }
 
     setReferenceFilesProcessing(true);
+    setReferenceFileProgress("資料を読み込んでいます...");
     setReferenceFileError("");
     const parsedDocuments: ReferenceDocument[] = [];
     let remainingCharacters = MAX_REFERENCE_TEXT_LENGTH - referenceTextLength;
@@ -355,7 +358,23 @@ export default function Home() {
       }
 
       try {
-        const parsed = await parseReferenceFile(file);
+        setReferenceFileProgress(`${file.name}: 文字を確認しています...`);
+        const parsed = await parseReferenceFile(file, (progress) => {
+          if (progress.phase === "loading-ocr") {
+            setReferenceFileProgress(`${file.name}: OCRを準備しています...`);
+            return;
+          }
+          if (progress.phase === "ocr") {
+            const percent = Math.round((progress.progress || 0) * 100);
+            setReferenceFileProgress(
+              `${file.name}: ${progress.page}/${progress.totalPages}ページをOCR中（${percent}%）`
+            );
+            return;
+          }
+          setReferenceFileProgress(
+            `${file.name}: ${progress.page}/${progress.totalPages}ページを確認中...`
+          );
+        });
         const text = parsed.text.slice(0, remainingCharacters);
         parsedDocuments.push({
           ...parsed,
@@ -372,6 +391,7 @@ export default function Home() {
       setReferenceDocuments((previous) => [...previous, ...parsedDocuments].slice(0, MAX_REFERENCE_FILES));
     }
     setReferenceFileError(errors.join("\n"));
+    setReferenceFileProgress("");
     setReferenceFilesProcessing(false);
   };
 
@@ -784,7 +804,7 @@ export default function Home() {
 
   return (
     <main className="max-w-4xl mx-auto px-4 py-12">
-      <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成アプリ v2.5.1</h1>
+      <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成アプリ v2.6.0</h1>
       <p className="text-center text-gray-600 mb-2">
         企業の公式採用ページ（Talentio / HRMOS / Wantedly / 自社採用HP）を優先取得し、HP・求人媒体（Indeed / doda / マイナビ転職 / リクナビNEXT / エン転職 等）も追加情報として参照して求人票を生成します。
       </p>
@@ -993,6 +1013,9 @@ export default function Home() {
               <p id="reference-files-help" className="text-xs text-gray-600 mt-1">
                 PDF・Excel（.xlsx / .xls）を最大{MAX_REFERENCE_FILES}ファイル、各{MAX_REFERENCE_FILE_SIZE_MB}MBまで。内容をブラウザ内で抽出します。
               </p>
+              <p className="text-xs text-gray-500 mt-1">
+                画像PDFも日本語・英語OCRに対応（1ファイル先頭{MAX_REFERENCE_OCR_PAGES}ページまで）。OCRは通常より時間がかかります。
+              </p>
             </div>
             <span className="text-xs text-gray-500 shrink-0">
               {referenceDocuments.length} / {MAX_REFERENCE_FILES}ファイル・{referenceTextLength.toLocaleString()} / {MAX_REFERENCE_TEXT_LENGTH.toLocaleString()}文字
@@ -1012,7 +1035,7 @@ export default function Home() {
 
           {referenceFilesProcessing ? (
             <p className="mt-3 text-sm font-medium text-blue-700" role="status">
-              資料から文字を抽出しています...
+              {referenceFileProgress || "資料から文字を抽出しています..."}
             </p>
           ) : null}
 
@@ -1027,6 +1050,7 @@ export default function Home() {
                     <p className="truncate text-sm font-medium text-gray-800">{document.name}</p>
                     <p className="mt-0.5 text-xs text-gray-500">
                       {formatFileSize(document.size)}・{document.text.length.toLocaleString()}文字抽出
+                      {document.usedOcr ? "・OCR使用" : ""}
                       {document.truncated ? "・上限に合わせて一部省略" : ""}
                     </p>
                   </div>
@@ -1047,7 +1071,7 @@ export default function Home() {
             <p className="mt-3 whitespace-pre-wrap text-sm text-red-600" role="alert">{referenceFileError}</p>
           ) : null}
           <p className="mt-3 text-xs text-amber-700">
-            画像だけのPDFは文字を抽出できません。OCR済みPDFをご利用ください。抽出内容は求人票作成とブラウザ履歴に使用されます。
+            OCRを含む文字抽出はブラウザ内で行います。抽出内容は求人票作成とブラウザ履歴に使用されます。
           </p>
         </div>
 
