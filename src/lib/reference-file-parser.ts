@@ -104,7 +104,7 @@ async function extractPdfText(file: File, onProgress?: ProgressHandler): Promise
           }
 
           const baseViewport = page.getViewport({ scale: 1 });
-          const scale = Math.min(2, 2000 / Math.max(baseViewport.width, baseViewport.height));
+          const scale = Math.min(3, 2400 / Math.max(baseViewport.width, baseViewport.height));
           const viewport = page.getViewport({ scale });
           const canvas = document.createElement("canvas");
           canvas.width = Math.max(1, Math.ceil(viewport.width));
