@@ -3,6 +3,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import {
   MAX_REFERENCE_FILES,
+  MAX_REFERENCE_FILE_SIZE_MB,
   MAX_REFERENCE_TEXT_LENGTH,
   isSupportedReferenceFile,
   parseReferenceFile,
@@ -783,7 +784,7 @@ export default function Home() {
 
   return (
     <main className="max-w-4xl mx-auto px-4 py-12">
-      <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成アプリ v2.5.0</h1>
+      <h1 className="text-3xl font-bold text-center mb-2">📋 求人票自動生成アプリ v2.5.1</h1>
       <p className="text-center text-gray-600 mb-2">
         企業の公式採用ページ（Talentio / HRMOS / Wantedly / 自社採用HP）を優先取得し、HP・求人媒体（Indeed / doda / マイナビ転職 / リクナビNEXT / エン転職 等）も追加情報として参照して求人票を生成します。
       </p>
@@ -990,7 +991,7 @@ export default function Home() {
                 お客様からいただいた資料（任意）
               </label>
               <p id="reference-files-help" className="text-xs text-gray-600 mt-1">
-                PDF・Excel（.xlsx / .xls）を最大{MAX_REFERENCE_FILES}ファイル、各10MBまで。内容をブラウザ内で抽出します。
+                PDF・Excel（.xlsx / .xls）を最大{MAX_REFERENCE_FILES}ファイル、各{MAX_REFERENCE_FILE_SIZE_MB}MBまで。内容をブラウザ内で抽出します。
               </p>
             </div>
             <span className="text-xs text-gray-500 shrink-0">

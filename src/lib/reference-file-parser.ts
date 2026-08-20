@@ -1,5 +1,6 @@
 export const MAX_REFERENCE_FILES = 5;
-export const MAX_REFERENCE_FILE_SIZE = 10 * 1024 * 1024;
+export const MAX_REFERENCE_FILE_SIZE_MB = 100;
+export const MAX_REFERENCE_FILE_SIZE = MAX_REFERENCE_FILE_SIZE_MB * 1024 * 1024;
 export const MAX_REFERENCE_TEXT_LENGTH = 50_000;
 
 export type ReferenceDocument = {
@@ -106,7 +107,7 @@ export async function parseReferenceFile(file: File): Promise<ReferenceDocument>
     throw new Error(`${file.name}: PDFまたはExcel（.xlsx / .xls）を選択してください。`);
   }
   if (file.size > MAX_REFERENCE_FILE_SIZE) {
-    throw new Error(`${file.name}: 1ファイル10MB以下にしてください。`);
+    throw new Error(`${file.name}: 1ファイル${MAX_REFERENCE_FILE_SIZE_MB}MB以下にしてください。`);
   }
 
   const extension = getExtension(file.name);
