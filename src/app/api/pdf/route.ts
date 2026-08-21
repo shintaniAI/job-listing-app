@@ -3,6 +3,7 @@ import { PDFDocument, rgb, PDFFont, PDFPage } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import path from "path";
 import fs from "fs/promises";
+import { checkRateLimit, rateLimitResponse } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -68,6 +69,9 @@ function sanitize(s: string): string {
 }
 
 export async function POST(req: NextRequest) {
+  const rl = checkRateLimit(req, { scope: "pdf", limit: 20, windowMs: 60_000 });
+  if (!rl.ok) return rateLimitResponse(rl);
+
   let data: SearchResult;
   try {
     data = (await req.json()) as SearchResult;

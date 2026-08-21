@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
+import { assertPublicUrl, isSsrfBlocked } from "@/lib/ssrf-guard";
+import { checkRateLimit, rateLimitResponse } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const maxDuration = 90;
@@ -216,6 +218,9 @@ function buildReferenceSourceBlock(documents: ReferenceDocumentSource[]): string
 }
 
 export async function POST(req: NextRequest) {
+  const rl = checkRateLimit(req, { scope: "generate-position", limit: 20, windowMs: 60_000 });
+  if (!rl.ok) return rateLimitResponse(rl);
+
   let body: any;
   try {
     body = await req.json();
@@ -225,12 +230,22 @@ export async function POST(req: NextRequest) {
 
   const positionTitle = String(body.positionTitle || "").trim().slice(0, 200);
   const companyName = String(body.companyName || "").trim().slice(0, 200);
-  const sources: string[] = Array.isArray(body.sources)
+  const rawSources: string[] = Array.isArray(body.sources)
     ? body.sources
         .filter((s: any) => typeof s === "string" && /^https?:\/\//.test(s))
         .slice(0, 4)
     : [];
   const referenceDocuments = parseReferenceDocumentSources(body.referenceDocuments);
+
+  const sources: string[] = [];
+  for (const u of rawSources) {
+    try {
+      await assertPublicUrl(u);
+      sources.push(u);
+    } catch (e) {
+      if (!isSsrfBlocked(e)) throw e;
+    }
+  }
 
   if (!positionTitle) {
     return NextResponse.json({ error: "positionTitle が必要です" }, { status: 400 });

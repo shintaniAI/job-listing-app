@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
+import { checkRateLimit, rateLimitResponse } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -97,6 +98,9 @@ function normalizeSources(raw: any): Source[] {
 }
 
 export async function POST(req: NextRequest) {
+  const rl = checkRateLimit(req, { scope: "search", limit: 15, windowMs: 60_000 });
+  if (!rl.ok) return rateLimitResponse(rl);
+
   let body: any;
   try {
     body = await req.json();
